@@ -91,7 +91,8 @@ class AnswerType(str, Enum):
     TEXT = "text"
     NUMBER = "number"
     DATE = "date"
-    CHOICE = "choice"
+    CHOICE = "choice"          # exactly one option
+    MULTI_CHOICE = "multi_choice"   # several options may apply at once (e.g. sea AND air)
     YES_NO = "yes_no"
 
 
@@ -467,6 +468,7 @@ class RFQ:
     completeness: Completeness = field(default_factory=Completeness)
     status: RFQStatus = RFQStatus.DRAFT
     turn: int = 0
+    line_seq: int = 0            # high-water mark: line ids are never reused
     supplier_summary: Optional[str] = None
     schema_version: int = 1
     created_at: str = field(default_factory=utc_now)
@@ -517,13 +519,19 @@ class RFQ:
         return None
 
     def next_line_item_id(self) -> str:
+        """Allocate a fresh id. Never reuses a deleted line's id, because a line id is the
+        join key a supplier quote will be matched against later."""
+        self.line_seq = max(self.line_seq, self._max_line_number()) + 1
+        return line_item_id(self.line_seq)
+
+    def _max_line_number(self) -> int:
         n = 0
         for li in self.line_items:
             try:
                 n = max(n, int(li.id.split("-")[-1]))
             except ValueError:
                 continue
-        return line_item_id(n + 1)
+        return n
 
     @property
     def is_classified(self) -> bool:
@@ -544,6 +552,7 @@ class RFQ:
             "completeness": self.completeness.to_dict(),
             "status": self.status.value,
             "turn": self.turn,
+            "line_seq": self.line_seq,
             "supplier_summary": self.supplier_summary,
             "schema_version": self.schema_version,
             "created_at": self.created_at,
@@ -570,6 +579,7 @@ class RFQ:
             completeness=Completeness.from_dict(d.get("completeness") or {}),
             status=_enum(RFQStatus, d.get("status"), RFQStatus.DRAFT),
             turn=int(d.get("turn") or 0),
+            line_seq=int(d.get("line_seq") or 0),   # older payloads derive it from the ids below
             supplier_summary=d.get("supplier_summary"),
             schema_version=int(d.get("schema_version") or 1),
             created_at=str(d.get("created_at") or utc_now()),

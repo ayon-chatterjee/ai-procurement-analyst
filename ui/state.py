@@ -17,6 +17,7 @@ K_ERROR = "last_error"
 K_PREFILL = "prefill_text"
 K_FLASH = "flash"
 K_TARGET = "nav_target"
+K_DIAGNOSTICS = "show_diagnostics"
 
 PAGES: Dict[str, Any] = {}   # filled by app.py: name -> st.Page
 

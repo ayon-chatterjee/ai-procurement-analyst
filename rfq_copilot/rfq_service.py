@@ -163,12 +163,21 @@ class RFQService:
         self.repo.save_rfq(rfq)
         return rfq
 
+    # Only these buyer messages start an AI turn; a manual edit or a status note does not.
+    TURN_KINDS = ("request", "answers")
+
     def has_pending_turn(self, rfq: RFQ) -> bool:
-        """True when the last buyer message has no assistant reply yet (AI failed)."""
-        msgs = self.transcript(rfq.id)
-        if not msgs:
-            return False
-        return msgs[-1].role == MessageRole.BUYER
+        """True when the buyer's last submitted turn never got an assistant reply (the AI failed).
+
+        Manual edits are also recorded as buyer messages, so filter by kind - otherwise editing
+        a field on the review page looks like a failed analysis and hides the open questions.
+        """
+        for m in reversed(self.transcript(rfq.id)):
+            if m.role == MessageRole.ASSISTANT and m.kind == "assistant":
+                return False
+            if m.role == MessageRole.BUYER and m.kind in self.TURN_KINDS:
+                return True
+        return False
 
     # ----------------------------------------------------------- manual edits
     def recompute(self, rfq_id: str) -> RFQ:
@@ -278,19 +287,11 @@ class RFQService:
                     li.source = prev.source
                     li.source_refs = prev.source_refs
             new_items.append(li)
-        # assign ids to new rows
+        # assign ids to new rows; next_line_item_id never reuses a removed line's id
         rfq.line_items = new_items
-        n = 0
-        for li in rfq.line_items:
-            if li.id:
-                try:
-                    n = max(n, int(li.id.split("-")[-1]))
-                except ValueError:
-                    pass
         for li in rfq.line_items:
             if not li.id:
-                n += 1
-                li.id = "LINE-%03d" % n
+                li.id = rfq.next_line_item_id()
         removed = [lid for lid in old if lid not in {li.id for li in rfq.line_items}]
         self._record_manual_edit(rfq, "Edited line items (%d rows%s)" % (len(rfq.line_items), (", removed %s" % ", ".join(removed)) if removed else ""),
                                  {"removed": removed, "rows": [li.to_dict() for li in rfq.line_items]})

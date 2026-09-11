@@ -90,6 +90,9 @@ class RFQHelpersTest(unittest.TestCase):
         self.assertIn("flute", rfq.technical_requirements)
         self.assertNotIn("flute", rfq.commercial_requirements)
         self.assertEqual(rfq.next_line_item_id(), "LINE-008")
+        # ids are never reused, even after the highest line is deleted
+        rfq.line_items = rfq.line_items[:-1]
+        self.assertEqual(rfq.next_line_item_id(), "LINE-009")
         self.assertEqual(len(rfq.open_questions()), 1)
         rfq.questions[0].status = QuestionStatus.ANSWERED
         self.assertEqual(len(rfq.open_questions()), 0)
@@ -197,9 +200,40 @@ class AnswerCollectionTest(unittest.TestCase):
         self.assertEqual(out["answers"], {"q_a": "BC", "q_b": "2,000"})
         self.assertEqual(out["skipped"], ["q_c"])
 
-    def test_typed_text_wins_over_a_selected_pill(self):
+    def test_typed_text_overrides_a_single_choice_pill(self):
         out = self._collect({"opt_q_a_3": "B", "ans_q_a_3": "E flute, single wall"})
         self.assertEqual(out["answers"], {"q_a": "E flute, single wall"})
+
+    def test_multi_select_collects_every_chosen_option(self):
+        """A buyer wanting both sea and air quoted must be able to say so."""
+        qs = [Question(id="q_m", category=Section.LOGISTICS, question="Shipping method?", field_key="shipping_method",
+                       answer_type=AnswerType.MULTI_CHOICE, suggested_options=["Sea", "Air", "Road", "Rail"])]
+        from ui import components
+
+        class _Stub(object):
+            session_state = {"opt_q_m_3": ["Sea", "Air"]}
+        original = components.st
+        components.st = _Stub()
+        try:
+            out = components.collect_answers(qs, turn=3)
+        finally:
+            components.st = original
+        self.assertEqual(out["answers"], {"q_m": "Sea, Air"})
+
+    def test_multi_select_appends_typed_detail_instead_of_replacing(self):
+        qs = [Question(id="q_m", category=Section.QUALITY, question="Certifications?", field_key="certifications",
+                       answer_type=AnswerType.MULTI_CHOICE, suggested_options=["FSC", "ISO 9001"])]
+        from ui import components
+
+        class _Stub(object):
+            session_state = {"opt_q_m_3": ["FSC"], "ans_q_m_3": "and BIS for India"}
+        original = components.st
+        components.st = _Stub()
+        try:
+            out = components.collect_answers(qs, turn=3)
+        finally:
+            components.st = original
+        self.assertEqual(out["answers"], {"q_m": "FSC; and BIS for India"})
 
     def test_an_answer_beats_a_stray_skip_tick(self):
         out = self._collect({"ans_q_c_3": "Mumbai", "skip_q_c_3": True})

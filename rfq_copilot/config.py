@@ -35,9 +35,11 @@ class Settings:
     claude_bin: str = "claude"          # RFQ_CLAUDE_BIN — path or name of the CLI
     db_path: str = str(REPO_ROOT / "data" / "rfq_copilot.db")  # RFQ_DB_PATH
     log_prompts: bool = False           # RFQ_AI_LOG_PROMPTS — store full prompt text in ai_calls
-    max_questions_first: int = 8
+    # The first screen should carry everything that materially matters, grouped by section.
+    # Trickling basic universal fields into later turns reads as an interrogation.
+    max_questions_first: int = 14
     max_questions_turn: int = 3
-    max_open_questions: int = 8
+    max_open_questions: int = 14
 
     @classmethod
     def from_env(cls) -> "Settings":

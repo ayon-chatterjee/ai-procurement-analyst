@@ -32,5 +32,8 @@ with st.sidebar:
         st.caption("Claude Code · signed in" + ((" · " + h["detail"]) if h.get("detail") else ""))
     else:
         st.caption("Claude Code · not signed in")
+    st.markdown("")
+    st.checkbox("Show diagnostics", key=state.K_DIAGNOSTICS,
+                help="AI call log and guard decisions on the Review page. Off by default.")
 
 st.navigation([copilot, review, saved], position="sidebar").run()

@@ -1,4 +1,10 @@
-"""Screen 1 — AI RFQ Copilot: describe a need, answer what matters, watch readiness grow."""
+"""Screen 1 — AI RFQ Copilot.
+
+The screen answers one question at a time: *what does the analyst still need from me?*
+So it shows the analyst's latest note and the open questions grouped by section, and
+nothing else. The turn-by-turn conversation is kept for traceability but stays collapsed,
+because a growing transcript pushes the actual work off the screen.
+"""
 from __future__ import annotations
 
 import streamlit as st
@@ -40,8 +46,7 @@ def _process_pending(svc) -> None:
     action = state.take_pending()
     if not action:
         return
-    label = "Analyzing your requirement…"
-    with st.status(label, expanded=True) as status:
+    with st.status("Analyzing your requirement…", expanded=True) as status:
         for step in STATUS_STEPS[:2]:
             st.write(step)
         try:
@@ -57,8 +62,7 @@ def _process_pending(svc) -> None:
             status.update(label="Analysis complete", state="complete", expanded=False)
             st.session_state.pop(state.K_ERROR, None)
         except AIError as e:
-            # The plain-English message goes to the buyer; the technical detail is already in the
-            # AI call log on the review page.
+            # The plain-English message goes to the buyer; the technical detail is in the audit log.
             status.update(label="Analysis did not complete", state="error", expanded=False)
             st.session_state[state.K_ERROR] = e.user_message
             if getattr(e, "rfq_id", None):
@@ -87,8 +91,7 @@ def _render_hero(svc) -> None:
     picked = st.pills("Try an example", list(EXAMPLES), selection_mode="single", key="example_pick", label_visibility="collapsed")
     if picked and picked != st.session_state.get("_last_example"):
         # Writing a widget's key only takes effect when the widget is created fresh, so rerun
-        # before the text area below is instantiated. Without this the chip silently does nothing
-        # once the box has been rendered at least once.
+        # before the text area below is instantiated.
         st.session_state["_last_example"] = picked
         st.session_state["start_text"] = EXAMPLES[picked]
         st.rerun()
@@ -118,9 +121,10 @@ def _render_workspace(svc, rfq: RFQ) -> None:
     left, right = st.columns([7, 3.6], gap="large")
     with left:
         _render_header(rfq)
-        _render_transcript(svc, rfq)
+        _render_analyst_note(svc, rfq)
         _render_errors(svc, rfq)
         _render_answer_surface(svc, rfq)
+        _render_history(svc, rfq)
     with right:
         with st.container(border=True):
             render_readiness_panel(rfq)
@@ -133,7 +137,7 @@ def _render_workspace(svc, rfq: RFQ) -> None:
 
 
 def _render_header(rfq: RFQ) -> None:
-    c1, c2 = st.columns([6, 1.3])
+    c1, c2 = st.columns([5.4, 1.7])
     with c1:
         st.markdown('<div class="rfq-kicker">RFQ draft</div><div class="rfq-title">%s</div>' % esc(rfq.title or rfq.product), unsafe_allow_html=True)
         bits = [esc(x) for x in (rfq.product, rfq.category, rfq.product_type) if x]
@@ -148,16 +152,17 @@ def _render_header(rfq: RFQ) -> None:
     st.markdown("")
 
 
-def _render_transcript(svc, rfq: RFQ) -> None:
+def _render_analyst_note(svc, rfq: RFQ) -> None:
+    """Only the analyst's latest note. Earlier turns live in the collapsed history."""
+    latest = None
     for m in svc.transcript(rfq.id):
-        if m.role == MessageRole.BUYER and m.kind in ("request", "answers"):
-            with st.chat_message("user"):
-                st.markdown(m.content)
-        elif m.role == MessageRole.ASSISTANT:
-            with st.chat_message("assistant"):
-                st.markdown(m.content)
-        elif m.kind in ("manual_edit", "status"):
-            st.caption("· " + m.content)
+        if m.role == MessageRole.ASSISTANT and m.kind == "assistant":
+            latest = m
+    if latest is None:
+        return
+    with st.container(border=True):
+        st.markdown('<div class="rfq-kicker">What I understood</div>', unsafe_allow_html=True)
+        st.markdown(latest.content)
 
 
 def _render_errors(svc, rfq: RFQ) -> None:
@@ -165,12 +170,11 @@ def _render_errors(svc, rfq: RFQ) -> None:
     pending = svc.has_pending_turn(rfq)
     if not err and not pending:
         return
-    with st.chat_message("assistant"):
-        st.error(err or "The last analysis didn't complete. Your answers are saved.")
-        if st.button("Try again", key="retry_btn", type="primary"):
-            st.session_state.pop(state.K_ERROR, None)
-            state.queue({"type": "retry", "rfq_id": rfq.id})
-            st.rerun()
+    st.error(err or "The last analysis didn't complete. Your answers are saved.")
+    if st.button("Try again", key="retry_btn", type="primary"):
+        st.session_state.pop(state.K_ERROR, None)
+        state.queue({"type": "retry", "rfq_id": rfq.id})
+        st.rerun()
 
 
 def _render_answer_surface(svc, rfq: RFQ) -> None:
@@ -185,17 +189,20 @@ def _render_answer_surface(svc, rfq: RFQ) -> None:
         if open_qs:
             st.markdown('<div class="rfq-kicker" style="margin-top:.6rem">%d question%s that affect%s supplier pricing</div>' % (
                 len(open_qs), "" if len(open_qs) == 1 else "s", "s" if len(open_qs) == 1 else ""), unsafe_allow_html=True)
+            st.caption("Answer what you know. Skip anything that doesn't apply.")
             for sec in SECTION_ORDER:
                 sec_qs = [q for q in open_qs if q.category == sec]
                 if not sec_qs:
                     continue
-                st.caption(SECTION_LABELS[sec])
+                st.markdown('<div class="rfq-section-head">%s</div>' % esc(SECTION_LABELS[sec]), unsafe_allow_html=True)
                 for q in sec_qs:
                     render_question_card(q, turn)
         else:
             st.success("No further questions — suppliers have what they need." if rfq.completeness.ready_to_send
                        else "No open questions right now. Fill the missing items on the right, or tell me more below.")
+        st.markdown('<div class="rfq-section-head">Anything else</div>', unsafe_allow_html=True)
         st.text_area("Or just tell me in your own words", key="free_%s_%d" % (rfq.id, turn), height=90,
+                     label_visibility="collapsed",
                      placeholder="e.g. They're 12 by 10 by 6 inches, 2,000 pieces each, shipping to Mumbai. Actually make the small one 3,000.")
         submitted = st.form_submit_button("Send to analyst", type="primary")
     if submitted:
@@ -206,3 +213,16 @@ def _render_answer_surface(svc, rfq: RFQ) -> None:
             return
         state.queue({"type": "turn", "rfq_id": rfq.id, "answers": payload["answers"], "skipped": payload["skipped"], "free_text": free_text})
         st.rerun()
+
+
+def _render_history(svc, rfq: RFQ) -> None:
+    """Kept for traceability, collapsed so it never competes with the questions."""
+    msgs = [m for m in svc.transcript(rfq.id) if m.kind in ("request", "answers", "assistant")]
+    if len(msgs) <= 1:
+        return
+    st.markdown("")
+    with st.expander("Conversation history (%d turns)" % rfq.turn, expanded=False):
+        for m in msgs:
+            who = "You" if m.role == MessageRole.BUYER else "Analyst"
+            st.markdown('<div class="rfq-kicker" style="margin-top:.5rem">%s · turn %d</div>' % (who, m.turn), unsafe_allow_html=True)
+            st.markdown(m.content)

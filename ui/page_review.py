@@ -84,38 +84,91 @@ def _overview(rfq: RFQ) -> None:
 
 
 def _line_items(svc, rfq: RFQ) -> None:
+    """Explicit per-line inputs inside one form.
+
+    An earlier version used st.data_editor; its delta-based widget state silently dropped
+    edits and showed phantom "None" rows, so every line is a plain widget now and one
+    submit writes them all.
+    """
+    locked = rfq.status == RFQStatus.SUPPLIER_READY
+    # Re-key on updated_at so the inputs reload from the saved data after each write.
+    rev = "%s_%s" % (rfq.id, rfq.updated_at)
+    extra_key = "li_extra_%s" % rfq.id
+    extra = int(st.session_state.get(extra_key, 0))
+
     with st.container(border=True):
         st.markdown('<div class="rfq-kicker">Line items</div>', unsafe_allow_html=True)
-        if not rfq.line_items:
-            st.markdown('<div class="rfq-field-value dim">No line items yet — list sizes or variants in the Copilot, or add rows below.</div>', unsafe_allow_html=True)
-        locked = rfq.status == RFQStatus.SUPPLIER_READY
-        df = line_items_frame(rfq)
-        edited = st.data_editor(
-            df, key="li_editor_%s_%d" % (rfq.id, rfq.turn), num_rows="fixed" if locked else "dynamic", disabled=locked or ["id", "source"],
-            hide_index=True, use_container_width=True,
-            column_config={
-                "id": st.column_config.TextColumn("Line", width="small"),
-                "product": st.column_config.TextColumn("Product"),
-                "specifications": st.column_config.TextColumn("Specifications", help="Name: value; Name: value"),
-                "quantity": st.column_config.NumberColumn("Quantity", min_value=0, step=1, format="%d"),
-                "unit": st.column_config.TextColumn("Unit", width="small"),
-                "target_price": st.column_config.NumberColumn("Target price", format="%.2f"),
-                "required_date": st.column_config.TextColumn("Required date"),
-                "source": st.column_config.TextColumn("Source", width="small"),
-            },
-        )
-        if not locked:
-            if st.button("Apply line item changes", key="apply_li"):
-                rows = edited.fillna("").to_dict("records")
-                try:
-                    svc.replace_line_items(rfq.id, rows)
-                    state.flash("Line items updated. Edits are recorded as buyer requirements.")
-                    st.rerun()
-                except RFQStateError as e:
-                    st.error(str(e))
-            needs = [li.id for li in rfq.line_items if li.source.value == "ai_recommended"]
-            if needs:
-                st.caption("Lines %s could not be matched to your exact words — confirm or edit them; unconfirmed lines block readiness." % ", ".join(needs))
+        if not rfq.line_items and not extra:
+            st.markdown('<div class="rfq-field-value dim">No line items yet. List sizes or variants in the Copilot, or add one below.</div>',
+                        unsafe_allow_html=True)
+        if locked:
+            for li in rfq.line_items:
+                st.markdown('<div class="rfq-line"><b>%s</b> · %s<br><span class="rfq-sub">%s</span><br>'
+                            '<span class="rfq-sub">%s %s%s</span></div>' % (
+                                esc(li.id), esc(li.product), esc(li.spec_summary() or li.description or "no specification"),
+                                esc("{:,}".format(int(li.quantity))) if li.quantity else "—", esc(li.unit),
+                                (" · due " + esc(li.required_date)) if li.required_date else ""), unsafe_allow_html=True)
+            return
+
+        with st.form("li_form_%s" % rev, border=False):
+            rows = []
+            for li in rfq.line_items:
+                rows.append(_line_inputs(rev, li.id, li.id, li.product, li.spec_summary() or li.description,
+                                         li.quantity, li.unit, li.target_price, li.required_date, removable=True))
+            for i in range(extra):
+                rows.append(_line_inputs(rev, "new%d" % i, "New", "", "", None, "pcs", None, "", removable=False))
+            saved = st.form_submit_button("Save line items", type="primary")
+        c1, c2 = st.columns([1.5, 5])
+        with c1:
+            if st.button("Add a line", key="li_add_%s" % rfq.id, use_container_width=True):
+                st.session_state[extra_key] = extra + 1
+                st.rerun()
+        with c2:
+            st.caption("Specifications use `Name: value; Name: value`. Tick Remove to delete a line.")
+
+        if saved:
+            payload = [r for r in rows if not r["remove"] and str(r["product"]).strip()]
+            dropped = [r["id"] for r in rows if not r["remove"] and not str(r["product"]).strip() and r["id"] != "New"]
+            try:
+                svc.replace_line_items(rfq.id, payload)
+                st.session_state[extra_key] = 0
+                msg = "Line items saved. Your edits are recorded as buyer requirements."
+                if dropped:
+                    msg += " %s had no product name and was removed." % ", ".join(dropped)
+                state.flash(msg)
+                st.rerun()
+            except RFQStateError as e:
+                st.error(str(e))
+
+        needs = [li.id for li in rfq.line_items if li.source.value == "ai_recommended"]
+        if needs:
+            st.caption("%s could not be matched to your exact words. Confirm or edit them; unconfirmed lines block readiness."
+                       % ", ".join(needs))
+
+
+def _line_inputs(rev, slot, label, product, specs, quantity, unit, price, date, removable):
+    """One editable line. Returns the values as a row dict for replace_line_items()."""
+    head, c1, c2 = st.columns([0.9, 4.2, 4.9])
+    with head:
+        st.markdown('<div class="rfq-line-id">%s</div>' % esc(label), unsafe_allow_html=True)
+    with c1:
+        p = st.text_input("Product", value=product, key="li_p_%s_%s" % (rev, slot), placeholder="Product name")
+    with c2:
+        sp = st.text_input("Specifications", value=specs, key="li_s_%s_%s" % (rev, slot),
+                           placeholder="Dimensions: 10 x 10 x 5 in; Flute: B")
+    q1, q2, q3, q4 = st.columns([2, 1.4, 2, 1.6])
+    with q1:
+        qty = st.number_input("Quantity", min_value=0, step=1, value=int(quantity) if quantity else 0,
+                              key="li_q_%s_%s" % (rev, slot))
+    with q2:
+        un = st.text_input("Unit", value=unit or "pcs", key="li_u_%s_%s" % (rev, slot))
+    with q3:
+        dt = st.text_input("Required date", value=date or "", key="li_d_%s_%s" % (rev, slot), placeholder="optional")
+    with q4:
+        rm = st.checkbox("Remove", key="li_x_%s_%s" % (rev, slot)) if removable else False
+    st.markdown('<div class="rfq-line-sep"></div>', unsafe_allow_html=True)
+    return {"id": "" if label == "New" else label, "product": p, "specifications": sp,
+            "quantity": qty or None, "unit": un, "target_price": price, "required_date": dt, "remove": rm}
 
 
 def _visible_fields(rfq: RFQ, sec: Section) -> List[FieldValue]:
@@ -210,19 +263,25 @@ def _field_popover(svc, rfq: RFQ, fv: FieldValue) -> None:
 
 
 def _audit(svc, rfq: RFQ) -> None:
-    with st.expander("Activity & AI audit", expanded=False):
+    """Diagnostics. Off by default: useful for trust, but not what a buyer came here for."""
+    if not st.session_state.get(state.K_DIAGNOSTICS):
+        return
+    st.markdown('<div class="rfq-muted">', unsafe_allow_html=True)
+    with st.expander("Diagnostics · AI calls and guard decisions", expanded=False):
         calls = svc.ai_calls(rfq.id)
         if calls:
             st.caption("AI calls (Claude Code CLI, real model reasoning)")
             st.dataframe(
-                [{"turn": c.turn, "type": c.call_type, "model": c.model, "seconds": round(c.duration_ms / 1000.0, 1), "ok": "✓" if c.ok else "✗",
-                  "schema": "valid" if c.schema_valid else "—", "prompt": c.prompt_version, "error": (c.error or "")[:80]} for c in calls],
+                [{"turn": c.turn, "type": c.call_type, "model": c.model, "seconds": round(c.duration_ms / 1000.0, 1),
+                  "ok": "yes" if c.ok else "no", "schema": "valid" if c.schema_valid else "—",
+                  "prompt": c.prompt_version, "error": (c.error or "")[:80]} for c in calls],
                 hide_index=True, use_container_width=True)
         notes = [m for m in svc.transcript(rfq.id) if m.kind in ("guards", "manual_edit", "status")]
         if notes:
             st.caption("Guard decisions and manual edits")
             for m in notes:
                 st.text("turn %d · %s" % (m.turn, m.content))
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _actions(svc, rfq: RFQ) -> None:

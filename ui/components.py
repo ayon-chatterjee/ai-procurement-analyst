@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from rfq_copilot.schema import (
-    RFQ, SECTION_LABELS, FieldStatus, FieldValue, Importance, Question, RFQStatus, Section, Source,
+    RFQ, SECTION_LABELS, AnswerType, FieldStatus, FieldValue, Importance, Question, RFQStatus, Section, Source,
 )
 from .theme import badge, esc
 
@@ -146,12 +146,22 @@ def question_widget_keys(q: Question, turn: int) -> Dict[str, str]:
 
 def render_question_card(q: Question, turn: int) -> None:
     keys = question_widget_keys(q, turn)
+    multi = q.answer_type == AnswerType.MULTI_CHOICE
     with st.container(border=True):
         st.markdown('<div class="rfq-q">%s</div>' % esc(q.question), unsafe_allow_html=True)
         st.markdown('%s <span class="rfq-why">&nbsp; Why this matters: %s</span>' % (importance_badge(q.importance), esc(q.reason)), unsafe_allow_html=True)
         if q.suggested_options:
-            st.pills("Choose or type below", q.suggested_options, selection_mode="single", key=keys["opt"], label_visibility="collapsed")
-        placeholder = {"number": "e.g. 2,000", "date": "e.g. 15 Oct 2026 or 'within 6 weeks'", "yes_no": "Yes / No"}.get(q.answer_type.value, "Your answer")
+            st.pills("Choose" + (" any that apply" if multi else ""), q.suggested_options,
+                     selection_mode="multi" if multi else "single", key=keys["opt"], label_visibility="collapsed")
+            if multi:
+                st.caption("Pick as many as apply.")
+        placeholder = {
+            "number": "e.g. 2,000",
+            "date": "e.g. 15 Oct 2026 or 'within 6 weeks'",
+            "yes_no": "Yes / No",
+            "multi_choice": "Anything else to add",
+            "choice": "Or type a different answer",
+        }.get(q.answer_type.value, "Your answer")
         col_a, col_b = st.columns([5, 1.4])
         with col_a:
             st.text_input("Answer", key=keys["ans"], placeholder=placeholder, label_visibility="collapsed")
@@ -164,12 +174,23 @@ def collect_answers(questions: List[Question], turn: int) -> Dict[str, object]:
     skipped: List[str] = []
     for q in questions:
         keys = question_widget_keys(q, turn)
+        multi = q.answer_type == AnswerType.MULTI_CHOICE
         typed = str(st.session_state.get(keys["ans"]) or "").strip()
         picked = st.session_state.get(keys["opt"])
-        if typed:
+        # Multi-select returns a list; several options can legitimately apply at once
+        # (both sea and air freight, or several certifications).
+        if isinstance(picked, (list, tuple, set)):
+            chosen = ", ".join(str(p) for p in picked if str(p).strip())
+        else:
+            chosen = str(picked) if picked else ""
+        if chosen and typed and multi:
+            # Multi-select: the typed box is labelled "Anything else to add", so combine.
+            answers[q.id] = "%s; %s" % (chosen, typed)
+        elif typed:
+            # Single choice: the typed box is labelled "Or type a different answer" - it overrides.
             answers[q.id] = typed
-        elif picked:
-            answers[q.id] = str(picked)
+        elif chosen:
+            answers[q.id] = chosen
         elif st.session_state.get(keys["skip"]):
             skipped.append(q.id)
     return {"answers": answers, "skipped": skipped}

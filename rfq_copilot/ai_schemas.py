@@ -39,7 +39,7 @@ SECTIONS = ["commercial", "sourcing", "logistics", "technical", "quality", "inst
 IMPORTANCE_ALL = ["required", "recommended", "optional", "not_applicable"]
 IMPORTANCE_ASKABLE = ["required", "recommended", "optional"]
 VALUE_KINDS = ["text", "number", "date", "list", "boolean"]
-ANSWER_TYPES = ["text", "number", "date", "choice", "yes_no"]
+ANSWER_TYPES = ["text", "number", "date", "choice", "multi_choice", "yes_no"]
 
 FIELD_UPDATE = obj(
     key=STR,

@@ -252,10 +252,12 @@ class QuestionGuardTest(unittest.TestCase):
 
     def test_first_turn_cap_and_ordering(self):
         rfq = rfq_with()
-        qs = [nq("Q%d?" % i, "f%d" % i, importance=("optional" if i % 3 == 0 else "required")) for i in range(12)]
+        qs = [nq("Q%d?" % i, "f%d" % i, importance=("optional" if i % 3 == 0 else "required")) for i in range(20)]
         audit = guards.reconcile_questions(rfq, [], qs, "", "msg:1", 1, True, self.settings)
-        self.assertEqual(len(rfq.open_questions()), 8)
-        self.assertEqual(rfq.open_questions()[0].importance, Importance.REQUIRED)
+        asked = [q for q in rfq.open_questions() if (q.field_key or "").startswith("f")]
+        self.assertEqual(len(asked), self.settings.max_questions_first)
+        self.assertEqual(asked[0].importance, Importance.REQUIRED, "most important first")
+        self.assertLessEqual(len(rfq.open_questions()), self.settings.max_open_questions)
         self.assertTrue(any("cap" in a for a in audit))
 
     def test_later_turn_cap_is_three_for_ai_questions(self):
@@ -301,6 +303,22 @@ class QuestionGuardTest(unittest.TestCase):
         self.assertEqual(q_flute.resolution, "unknown")
         self.assertEqual(rfq.fields["flute"].status, FieldStatus.UNKNOWN) if "flute" in rfq.fields else None
         self.assertEqual(q_price.answer, "Around $0.40")
+
+    def test_first_turn_also_covers_recommended_universal_fields(self):
+        """Basics like shipping method must appear on the first screen, not three turns later."""
+        rfq = rfq_with()
+        guards.reconcile_questions(rfq, [], [nq("What flute?", "flute")], "", "msg:1", 1, True, self.settings)
+        keys = [q.field_key for q in rfq.open_questions()]
+        for k in ("quantity", "destination", "customization_type", "technical_summary",
+                  "shipping_method", "sourcing_country", "currency", "required_delivery_date"):
+            self.assertIn(k, keys, "%s should be asked up front" % k)
+
+    def test_later_turns_only_backfill_required_fields(self):
+        rfq = rfq_with()
+        guards.reconcile_questions(rfq, [], [nq("What flute?", "flute")], "", "msg:2", 2, False, self.settings)
+        keys = [q.field_key for q in rfq.open_questions()]
+        self.assertIn("quantity", keys, "a required gap is still backfilled")
+        self.assertNotIn("shipping_method", keys, "recommended basics are not injected mid-conversation")
 
     def test_required_field_never_asked_gets_a_standard_question_once(self):
         rfq = rfq_with()

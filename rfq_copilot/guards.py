@@ -698,10 +698,13 @@ def reconcile_questions(rfq: RFQ, ai_answered: List[Dict[str, Any]], new_questio
         ))
         added += 1
 
-    # 5. safety net: a REQUIRED universal field that nobody has ever asked about gets the
-    #    registry's standard question, so readiness is always reachable. Bounded by the open cap.
-    for fv in rfq.fields.values():
-        if fv.importance != Importance.REQUIRED or fv.status != FieldStatus.MISSING:
+    # 5. safety net: a universal field nobody has ever asked about gets the registry's standard
+    #    question, so readiness is reachable and the buyer is not asked basics several turns later.
+    #    Required fields always; recommended ones too on the first turn, when the buyer sees the
+    #    whole picture at once. Bounded by the open-question cap either way.
+    wanted = (Importance.REQUIRED, Importance.RECOMMENDED) if is_first_turn else (Importance.REQUIRED,)
+    for fv in sorted(rfq.fields.values(), key=lambda f: (_rank(f.importance), f.key)):
+        if fv.importance not in wanted or fv.status != FieldStatus.MISSING:
             continue
         if any(q.field_key == fv.key for q in rfq.questions):
             continue

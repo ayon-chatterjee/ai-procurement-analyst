@@ -37,7 +37,7 @@ class ServiceFlowTest(unittest.TestCase):
         self.assertEqual(rfq.status, RFQStatus.IN_PROGRESS)
         ai_keys = {"box_dimensions", "quantity", "board_grade", "printing", "destination", "required_delivery_date"}
         self.assertTrue(ai_keys.issubset({q.field_key for q in rfq.open_questions()}), "all AI questions kept")
-        self.assertLessEqual(len(rfq.open_questions()), 8, "questions stay bounded")
+        self.assertLessEqual(len(rfq.open_questions()), svc.settings.max_open_questions, "questions stay bounded")
         # required universal fields the AI never asked about get a standard question so readiness is reachable
         self.assertIn("customization_type", {q.field_key for q in rfq.open_questions()})
         self.assertEqual(rfq.fields["sample_requirements"].status, FieldStatus.NOT_APPLICABLE)
@@ -185,6 +185,71 @@ class ServiceFlowTest(unittest.TestCase):
         svc.repo.save_rfq(rfq)
         rfq = svc.set_field(rfq.id, "destination", "Delhi")
         self.assertEqual(rfq.fields["destination"].history[-1]["value"], "Pune warehouse")
+
+    def test_line_item_edits_from_the_review_editor_persist(self):
+        """Regression: an earlier st.data_editor implementation silently discarded these rows."""
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        ai.outputs = [base_turn_output(
+            line_items={"mode": "replace", "items": [line("Carton", s_, 100.0, s_) for s_ in ("10x10x5", "12x10x6", "15x10x8")]})]
+        rfq = svc.submit_turn(rfq.id, answers={}, skipped=[], free_text="10x10x5, 12x10x6, 15x10x8 at 100 each")
+        self.assertEqual(len(rfq.line_items), 3)
+
+        # exactly the row shape the per-line form produces
+        rows = [
+            {"id": "LINE-001", "product": "Heavy Duty Carton", "specifications": "Dimensions: 10x10x5 in",
+             "quantity": 250, "unit": "pcs", "target_price": None, "required_date": "2026-11-01"},
+            {"id": "LINE-002", "product": "Carton", "specifications": "Dimensions: 12x10x6 in",
+             "quantity": 100, "unit": "pcs", "target_price": None, "required_date": ""},
+            {"id": "", "product": "Oversize Carton", "specifications": "Dimensions: 40x30x20 in",
+             "quantity": 50, "unit": "pcs", "target_price": None, "required_date": ""},
+        ]   # LINE-003 omitted, i.e. removed
+        rfq = svc.replace_line_items(rfq.id, rows)
+        by_id = {li.id: li for li in rfq.line_items}
+        self.assertEqual(sorted(by_id), ["LINE-001", "LINE-002", "LINE-004"])
+        self.assertEqual(by_id["LINE-001"].product, "Heavy Duty Carton")
+        self.assertEqual(by_id["LINE-001"].quantity, 250.0)
+        self.assertEqual(by_id["LINE-001"].required_date, "2026-11-01")
+        self.assertEqual(by_id["LINE-001"].source, Source.MANUAL_EDIT, "an edit is an explicit buyer requirement")
+        self.assertTrue(by_id["LINE-001"].history, "the previous values are auditable")
+        self.assertEqual(by_id["LINE-002"].source, Source.BUYER_EXPLICIT, "an untouched line keeps its provenance")
+        self.assertEqual(by_id["LINE-004"].product, "Oversize Carton", "a new row gets the next id")
+        # the RFQ-level quantity follows the lines
+        self.assertEqual(rfq.fields["quantity"].value, 400.0)
+        # and it survives a reload
+        self.assertEqual(svc.get(rfq.id).line_items[0].product, "Heavy Duty Carton")
+
+    def test_a_manual_edit_is_not_mistaken_for_a_failed_ai_turn(self):
+        """Regression: manual edits are buyer messages too, and a naive last-message check
+        made the copilot claim the analysis had failed and hide every open question."""
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        self.assertFalse(svc.has_pending_turn(rfq))
+        rfq = svc.set_field(rfq.id, "destination", "Mumbai")
+        self.assertFalse(svc.has_pending_turn(rfq), "a manual edit does not start an AI turn")
+        rfq = svc.replace_line_items(rfq.id, [{"id": "", "product": "Carton", "specifications": "", "quantity": 10,
+                                               "unit": "pcs", "target_price": None, "required_date": ""}])
+        self.assertFalse(svc.has_pending_turn(rfq), "a line-item save does not start an AI turn")
+        # a genuinely failed turn still registers
+        ai.outputs = [AITimeout("slow")]
+        q = rfq.open_questions()[0]
+        with self.assertRaises(AITimeout):
+            svc.submit_turn(rfq.id, answers={q.id: "something"}, skipped=[], free_text="")
+        self.assertTrue(svc.has_pending_turn(svc.get(rfq.id)))
+
+    def test_rows_without_a_product_are_dropped_not_saved_blank(self):
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        rfq = svc.replace_line_items(rfq.id, [
+            {"id": "", "product": "Carton", "specifications": "Dimensions: 1x1x1 in", "quantity": 5, "unit": "pcs",
+             "target_price": None, "required_date": ""},
+            {"id": "", "product": "   ", "specifications": "", "quantity": 0, "unit": "pcs",
+             "target_price": None, "required_date": ""},
+        ])
+        self.assertEqual([li.product for li in rfq.line_items], ["Carton"])
 
     def test_supplier_ready_gate_and_reopen(self):
         ai = StubAIService(outputs=[FIRST])
