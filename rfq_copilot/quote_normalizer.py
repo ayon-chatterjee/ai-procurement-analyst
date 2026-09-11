@@ -232,12 +232,22 @@ def refresh_derived_values(quote: SupplierQuote, rfq: Optional[RFQ] = None,
 
 
 def currencies_in(quotes: List[SupplierQuote]) -> List[str]:
+    """Only currencies we actually recognise. A supplier writing "cents" has not named
+    one, and listing it alongside USD and EUR would imply we had understood it."""
+    from .supplier_guards import KNOWN_CURRENCIES
     out = []
     for q in quotes:
         c = (q.currency or "").strip().upper()
-        if c and c not in out:
+        if c and c in KNOWN_CURRENCIES and c not in out:
             out.append(c)
     return out
+
+
+def unnamed_currency_quotes(quotes: List[SupplierQuote]) -> List[SupplierQuote]:
+    """Priced quotes whose currency we could not identify."""
+    from .supplier_guards import KNOWN_CURRENCIES
+    return [q for q in quotes
+            if q.has_price and (q.currency or "").strip().upper() not in KNOWN_CURRENCIES]
 
 
 def comparable_across(quotes: List[SupplierQuote]) -> bool:

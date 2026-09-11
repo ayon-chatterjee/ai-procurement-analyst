@@ -20,6 +20,7 @@ K_TARGET = "nav_target"
 K_DIAGNOSTICS = "show_diagnostics"
 K_PENDING_QUOTES = "pending_quotes_action"
 K_QUOTES_ERROR = "quotes_error"
+K_DISPLAY_CCY = "display_currency"
 
 PAGES: Dict[str, Any] = {}   # filled by app.py: name -> st.Page
 

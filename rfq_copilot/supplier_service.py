@@ -7,6 +7,8 @@ the normalised comparison dataset that Phase 3 will query.
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -14,9 +16,11 @@ from . import supplier_guards as sg
 from .ai_service import AIError, AIService
 from .config import Settings
 from .document_extractor import DocumentExtractorRegistry
+from .fx import Converted, FxService, RateTable, convert_amount
 from .persistence import RFQRepository, SupplierRepository
 from .quote_normalizer import (
     apply_discount, check_moq, comparable_across, currencies_in, normalize_price, refresh_derived_values,
+    unnamed_currency_quotes,
 )
 from .rfq_service import RFQStateError
 from .schema import RFQ, new_id, utc_now
@@ -65,9 +69,11 @@ class ComparisonCell:
     supplier_id: str
     state: str = CellState.NOT_QUOTED
     quote: Optional[SupplierQuote] = None
+    converted: Optional[Converted] = None    # set when a display currency is in force
 
     @property
-    def display(self) -> str:
+    def native_display(self) -> str:
+        """The price in the currency the supplier actually used."""
         if self.state == CellState.NO_RESPONSE:
             return "no response"
         if self.quote is None or not self.quote.has_price:
@@ -75,6 +81,13 @@ class ComparisonCell:
         if self.quote.normalized_unit_price is None:
             return "unresolved"
         return "%s %s" % (self.quote.currency, _trim(self.quote.normalized_unit_price))
+
+    @property
+    def display(self) -> str:
+        """What the table shows: converted when we have a real rate, native otherwise."""
+        if self.converted is not None:
+            return "%s %s" % (self.converted.currency, _trim(self.converted.amount))
+        return self.native_display
 
 
 @dataclass
@@ -84,6 +97,8 @@ class ComparisonMatrix:
     bundles: Dict[str, ResponseBundle] = field(default_factory=dict)      # supplier_id -> active bundle
     cells: Dict[Tuple[str, str], ComparisonCell] = field(default_factory=dict)
     summary: Dict[str, Any] = field(default_factory=dict)
+    display_currency: Optional[str] = None        # None = show each supplier's own currency
+    rates: Optional[RateTable] = None
 
     def cell(self, line_item_id: str, supplier_id: str) -> ComparisonCell:
         return self.cells.get((line_item_id, supplier_id),
@@ -110,6 +125,11 @@ class SupplierService:
         self.settings = settings or Settings.from_env()
         self.ai = ai
         self.extractor = extractor or SupplierExtractor(ai, self.settings)
+        #: SQLite is in WAL mode and each call opens its own connection, but a bundle
+        #: write spans several statements, so writes are serialised.
+        self._write_lock = threading.Lock()
+        self.fx = FxService(cache_path=os.path.join(os.path.dirname(self.settings.db_path) or ".",
+                                                    "fx_cache.json"))
 
     # ------------------------------------------------------------ ingestion
     def seed_demo_responses(self, rfq_id: str, fixture_dir: str = FIXTURE_DIR,
@@ -182,45 +202,78 @@ class SupplierService:
         paths = [d.path for d in bundle.documents]
 
         outcome = self.extractor.extract(rfq, supplier, paths, response=bundle.response, on_stage=on_stage)
-        for rec in outcome.ai_calls:
-            self.store.add_ai_call(rec, response_id=response_id)
-        self.store.save_bundle(outcome.bundle)
-        self._resolve_revisions(rfq.id, supplier.id)
+        with self._write_lock:
+            for rec in outcome.ai_calls:
+                self.store.add_ai_call(rec, response_id=response_id)
+            self.store.save_bundle(outcome.bundle)
+            self._resolve_revisions(rfq.id, supplier.id)
         return outcome.bundle
 
     def extract_all(self, rfq_id: str, on_stage: Optional[Callable[[str, str], None]] = None,
-                    only_pending: bool = True) -> Dict[str, Any]:
-        """Extract every response for an RFQ. One supplier failing never stops the rest."""
-        results = {"succeeded": [], "failed": [], "skipped": []}
+                    only_pending: bool = True, max_workers: Optional[int] = None) -> Dict[str, Any]:
+        """Extract every pending response, several at a time.
+
+        Each supplier's extraction is an independent subprocess call, so running them
+        concurrently is a straight wall-clock win. One supplier failing never stops the
+        others, and progress is reported from this thread as each finishes, so it stays
+        safe to call from a UI.
+        """
+        results: Dict[str, Any] = {"succeeded": [], "failed": [], "skipped": []}
+        todo = []
         for response in self.store.list_responses(rfq_id):
             supplier = self.store.get_supplier(response.supplier_id)
             name = supplier.name if supplier else response.supplier_id
             if only_pending and response.extraction_status not in (ExtractionStatus.PENDING, ExtractionStatus.FAILED):
                 results["skipped"].append(name)
                 continue
+            todo.append((response.id, name))
+        if not todo:
+            return results
+
+        workers = max(1, min(max_workers or self.settings.extraction_workers, len(todo)))
+        if on_stage:
+            on_stage("", "Reading %d supplier response%s, %d at a time…"
+                     % (len(todo), "" if len(todo) == 1 else "s", workers))
+
+        def run(item):
+            response_id, name = item
             try:
-                bundle = self.extract_response(
-                    response.id, on_stage=(lambda s, n=name: on_stage(n, s)) if on_stage else None)
-                if bundle.response.extraction_status in (ExtractionStatus.FAILED, ExtractionStatus.UNSUPPORTED):
+                return name, self.extract_response(response_id), None
+            except Exception as e:                 # one supplier must never abandon the rest
+                return name, None, e
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, item) for item in todo]
+            for done in as_completed(futures):
+                name, bundle, error = done.result()
+                if error is not None:
+                    note = getattr(error, "user_message", None) or str(error)[:200]
+                    results["failed"].append((name, note))
+                    self._mark_failed_by_name(rfq_id, name, note)
+                elif bundle.response.extraction_status in (ExtractionStatus.FAILED, ExtractionStatus.UNSUPPORTED):
                     results["failed"].append((name, bundle.response.extraction_note))
                 else:
                     results["succeeded"].append(name)
-            except AIError as e:
-                results["failed"].append((name, e.user_message))
-                self._mark_failed(response.id, e.user_message)
-            except Exception as e:                                    # never abandon the other suppliers
-                results["failed"].append((name, str(e)[:200]))
-                self._mark_failed(response.id, str(e)[:200])
+                if on_stage:
+                    on_stage(name, "done · %d of %d" % (len(results["succeeded"]) + len(results["failed"]), len(todo)))
         return results
 
+    def _mark_failed_by_name(self, rfq_id: str, name: str, note: str) -> None:
+        for r in self.store.list_responses(rfq_id):
+            supplier = self.store.get_supplier(r.supplier_id)
+            if supplier and supplier.name == name and r.extraction_status != ExtractionStatus.EXTRACTED:
+                self._mark_failed(r.id, note)
+                return
+
     def _mark_failed(self, response_id: str, note: str) -> None:
-        bundle = self.store.get_bundle(response_id)
-        if bundle is None:
-            return
-        bundle.response.extraction_status = ExtractionStatus.FAILED
-        bundle.response.extraction_note = note
-        bundle.response.updated_at = utc_now()
-        self.store.save_bundle(bundle)
+        with self._write_lock:
+            bundle = self.store.get_bundle(response_id)
+            if bundle is None:
+                return
+            bundle.response.extraction_status = ExtractionStatus.FAILED
+            bundle.response.extraction_note = note
+            bundle.response.updated_at = utc_now()
+            self.store.save_bundle(bundle)
 
     def _resolve_revisions(self, rfq_id: str, supplier_id: str) -> None:
         """The newest response for a supplier is the active one; earlier ones are kept."""
@@ -237,12 +290,17 @@ class SupplierService:
                 self.store.save_bundle(bundle)
 
     # ---------------------------------------------------------- comparison
-    def build_comparison(self, rfq_id: str) -> ComparisonMatrix:
-        """The normalised dataset: one cell per RFQ line per supplier. Phase 3 reads this."""
+    def build_comparison(self, rfq_id: str, display_currency: Optional[str] = None) -> ComparisonMatrix:
+        """The normalised dataset: one cell per RFQ line per supplier. Phase 3 reads this.
+
+        When `display_currency` is given, prices are converted using a real published
+        rate. The supplier's own figure and currency are kept on the quote either way, so
+        a converted number can always be traced back to what they actually wrote.
+        """
         rfq = self.repo.get_rfq(rfq_id)
         if rfq is None:
             raise RFQStateError("RFQ %s not found" % rfq_id)
-        matrix = ComparisonMatrix(rfq=rfq)
+        matrix = ComparisonMatrix(rfq=rfq, display_currency=(display_currency or "").strip().upper() or None)
 
         bundles = self.store.list_bundles(rfq_id, active_only=True)
         by_supplier = {b.response.supplier_id: b for b in bundles}
@@ -277,6 +335,15 @@ class SupplierService:
                 matrix.cells[(line.id, supplier.id)] = ComparisonCell(
                     line.id, supplier.id, _cell_state(quote), quote)
 
+        if matrix.display_currency:
+            matrix.rates = self.fx.rates(matrix.display_currency)
+            for cell in matrix.cells.values():
+                q = cell.quote
+                if q is None or q.normalized_unit_price is None:
+                    continue
+                cell.converted = convert_amount(matrix.rates, q.normalized_unit_price,
+                                                q.currency, matrix.display_currency)
+
         matrix.summary = self._summary(rfq, matrix, bundles, all_suppliers)
         return matrix
 
@@ -310,6 +377,14 @@ class SupplierService:
             "superseded_responses": len(revisions),
             "currencies": matrix.currencies(),
             "single_currency": matrix.single_currency(),
+            "unnamed_currency": sum(len(unnamed_currency_quotes(b.quotes)) for b in bundles),
+            "display_currency": matrix.display_currency,
+            "rate_source": matrix.rates.source if (matrix.rates and matrix.rates.ok) else "",
+            "rate_as_of": matrix.rates.as_of if (matrix.rates and matrix.rates.ok) else "",
+            "rate_error": (matrix.rates.error if matrix.rates else "") if matrix.display_currency else "",
+            "unconvertible": len([c for c in matrix.cells.values()
+                                  if c.quote is not None and c.quote.normalized_unit_price is not None
+                                  and c.converted is None]) if matrix.display_currency else 0,
         }
 
     # --------------------------------------------------- human in the loop

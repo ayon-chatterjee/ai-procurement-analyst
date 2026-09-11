@@ -141,9 +141,25 @@ class ExtractionFlowTest(ServiceHarness):
         resp, _ = self.register(svc, "Test Supplier", DOC_A)
         svc.extract_response(resp.id)
         calls = svc.extraction_calls(resp.id)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual({c.call_type for c in calls}, {"supplier_extraction", "supplier_line_match"})
+        # Dimensions settle both lines here, so the line-matching call is skipped and
+        # only the extraction call is made. Every call that does happen is audited.
+        self.assertEqual([c.call_type for c in calls], ["supplier_extraction"])
         self.assertTrue(all(c.prompt_hash and c.prompt_version for c in calls))
+
+    def test_the_matching_call_is_skipped_only_when_dimensions_settle_every_line(self):
+        clear = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5", ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc, ai = self.build([clear])
+        resp, _ = self.register(svc, "Clear Supplier", DOC_A)
+        svc.extract_response(resp.id)
+        self.assertEqual(len(ai.calls), 1, "an unambiguous line needs no second opinion")
+
+        vague = extraction_payload(
+            quote_lines=[quote_line("jumbo mailer", 0.42, None, ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc2, ai2 = self.build([vague, match_payload([match("jumbo mailer", None, basis="none", confidence=0.2)])])
+        resp2, _ = self.register(svc2, "Vague Supplier", DOC_A)
+        svc2.extract_response(resp2.id)
+        self.assertEqual(len(ai2.calls), 2, "an unidentifiable line is worth a second opinion")
 
 
 class RevisionTest(ServiceHarness):
@@ -337,3 +353,92 @@ class Phase1StillWorksTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExchangeRateTest(unittest.TestCase):
+    """Conversion is allowed, but only with a real rate that can be cited."""
+
+    def _table(self):
+        from rfq_copilot.fx import RateTable
+        import time
+        return RateTable(base="USD", rates={"EUR": 0.86, "INR": 95.5}, source="test-provider",
+                         as_of="2026-09-11", fetched_at=time.time())
+
+    def test_conversion_keeps_the_original_and_names_the_rate(self):
+        from rfq_copilot.fx import convert_amount
+        c = convert_amount(self._table(), 0.39, "EUR", "USD")
+        self.assertAlmostEqual(c.amount, 0.39 / 0.86, places=6)
+        self.assertEqual(c.original_amount, 0.39)
+        self.assertEqual(c.original_currency, "EUR")
+        self.assertIn("test-provider", c.describe_rate())
+        self.assertIn("2026-09-11", c.describe_rate())
+
+    def test_an_unknown_currency_is_never_converted(self):
+        from rfq_copilot.fx import convert_amount
+        self.assertIsNone(convert_amount(self._table(), 41.0, "CENTS", "USD"),
+                          "a currency we cannot name has no rate")
+
+    def test_no_rate_table_means_no_conversion_rather_than_a_guess(self):
+        from rfq_copilot.fx import convert_amount
+        self.assertIsNone(convert_amount(None, 0.39, "EUR", "USD"))
+
+    def test_a_failed_fetch_never_invents_a_rate(self):
+        from rfq_copilot.fx import FxService
+        def broken(req, timeout=None):
+            raise OSError("network down")
+        t = FxService(cache_path=None, opener=broken).rates("USD")
+        self.assertFalse(t.ok)
+        self.assertEqual(t.rates, {})
+        self.assertIsNone(t.rate("EUR", "USD"))
+
+    def test_same_currency_needs_no_rate(self):
+        from rfq_copilot.fx import convert_amount
+        c = convert_amount(None, 0.42, "USD", "USD")
+        self.assertEqual(c.amount, 0.42)
+        self.assertFalse(c.is_conversion)
+
+
+class ComparisonCurrencyTest(ServiceHarness):
+    def test_prices_convert_on_request_and_keep_their_origin(self):
+        import time
+        from rfq_copilot.fx import RateTable
+        usd = extraction_payload(quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5", currency="USD",
+                                                         ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        eur = extraction_payload(quote_lines=[quote_line("Line 1", 0.39, "10 x 10 x 5", currency="EUR",
+                                                         ev="Line 1  10 x 10 x 5  2000 pcs  0.39")])
+        svc, _ = self.build([usd, eur])
+        r1, s1 = self.register(svc, "USD Supplier", "Line 1  10 x 10 x 5  2000 pcs  0.42", "a.txt")
+        r2, s2 = self.register(svc, "EUR Supplier", "Line 1  10 x 10 x 5  2000 pcs  0.39", "b.txt")
+        svc.extract_response(r1.id)
+        svc.extract_response(r2.id)
+
+        # a fixed table so the assertion does not depend on today's market
+        svc.fx._memory["USD"] = RateTable(base="USD", rates={"EUR": 0.86}, source="test-provider",
+                                          as_of="2026-09-11", fetched_at=time.time())
+
+        native = svc.build_comparison(self.rfq.id)
+        self.assertIn("EUR", native.cell("LINE-001", s2.id).display)
+
+        converted = svc.build_comparison(self.rfq.id, display_currency="USD")
+        cell = converted.cell("LINE-001", s2.id)
+        self.assertTrue(cell.display.startswith("USD"), "the table shows the chosen currency")
+        self.assertIn("EUR", cell.native_display, "the supplier's own figure is still available")
+        self.assertEqual(cell.quote.currency, "EUR", "the stored quote is untouched")
+        self.assertAlmostEqual(cell.converted.amount, 0.39 / 0.86, places=6)
+        self.assertEqual(converted.summary["rate_source"], "test-provider")
+        self.assertEqual(converted.summary["unconvertible"], 0)
+
+    def test_an_unnamed_currency_is_counted_as_unconvertible_not_converted(self):
+        import time
+        from rfq_copilot.fx import RateTable
+        payload = extraction_payload(quote_lines=[quote_line("Line 1", 41.0, "10 x 10 x 5", currency="cents",
+                                                             ev="Line 1  10 x 10 x 5  2000 pcs  41.0")])
+        svc, _ = self.build([payload])
+        resp, supplier = self.register(svc, "Vague Supplier", "Line 1  10 x 10 x 5  2000 pcs  41.0")
+        svc.extract_response(resp.id)
+        svc.fx._memory["USD"] = RateTable(base="USD", rates={"EUR": 0.86}, source="test-provider",
+                                          as_of="2026-09-11", fetched_at=time.time())
+        m = svc.build_comparison(self.rfq.id, display_currency="USD")
+        cell = m.cell("LINE-001", supplier.id)
+        self.assertIsNone(cell.converted, "an unnamed currency has no rate to convert with")
+        self.assertEqual(cell.display, "unresolved")

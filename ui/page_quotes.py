@@ -96,7 +96,7 @@ def _process_pending(sup) -> None:
         label = st.empty()
         with st.status("Processing supplier responses…", expanded=True) as status:
             def on_stage(name, stage_text):
-                st.write("**%s** — %s" % (name, stage_text))
+                st.write(("**%s** — %s" % (name, stage_text)) if name else stage_text)
             try:
                 if kind == "extract":
                     res = sup.extract_all(action["rfq_id"], on_stage=on_stage, only_pending=action.get("only_pending", True))
@@ -176,22 +176,54 @@ def _summary_bar(sup, rfq) -> None:
     cols[2].metric("Line responses", s["line_responses"], help="Supplier prices matched to an RFQ line")
     cols[3].metric("Missing quotes", s["missing_quotes"], help="Lines a supplier did not price")
     cols[4].metric("Need review", s["need_review"], help="Responses with something unresolved")
-    if not s["single_currency"]:
-        st.warning("Suppliers quoted in %s. Comparing across currencies needs an exchange-rate "
-                   "assumption, which this prototype does not make, so prices are shown in the currency "
-                   "each supplier used." % ", ".join(s["currencies"]))
+    _currency_control(matrix, s)
+    if s.get("unnamed_currency"):
+        st.warning("%d quoted price%s give a number without naming a currency. %s held out of the "
+                   "comparison until the supplier confirms it, rather than being guessed at."
+                   % (s["unnamed_currency"], "" if s["unnamed_currency"] == 1 else "s",
+                      "It is" if s["unnamed_currency"] == 1 else "They are"))
     st.markdown("")
 
 
-@st.cache_data(show_spinner=False, ttl=2)
-def _matrix_cached(rfq_id: str, stamp: str):
-    return state.get_supplier_service().build_comparison(rfq_id)
+NATIVE = "Each supplier's own currency"
+
+
+def _currency_control(matrix, summary) -> None:
+    """Let the buyer pick a single currency, and say exactly which rate was applied."""
+    options = [NATIVE] + sorted(set(summary["currencies"]) | {"USD", "EUR", "INR", "GBP", "CNY"})
+    current = st.session_state.get(state.K_DISPLAY_CCY) or NATIVE
+    if current not in options:
+        options.append(current)
+    c1, c2 = st.columns([1.6, 5])
+    with c1:
+        picked = st.selectbox("Show prices in", options, index=options.index(current), key="ccy_pick")
+    chosen = None if picked == NATIVE else picked
+    if chosen != st.session_state.get(state.K_DISPLAY_CCY):
+        st.session_state[state.K_DISPLAY_CCY] = chosen
+        st.rerun()
+
+    with c2:
+        if not chosen:
+            if len(summary["currencies"]) > 1:
+                st.caption("Suppliers quoted in %s. Pick a currency above to convert them at a live "
+                           "published rate." % ", ".join(summary["currencies"]))
+            return
+        if summary.get("rate_source"):
+            st.caption("Converted at rates from %s, published %s. Each supplier's original figure and "
+                       "currency are kept and shown alongside."
+                       % (summary["rate_source"], summary.get("rate_as_of") or "today"))
+        if summary.get("rate_error"):
+            st.warning("Exchange rates could not be refreshed: %s" % summary["rate_error"])
+        if summary.get("unconvertible"):
+            st.warning("%d price%s could not be converted and %s shown in their original currency."
+                       % (summary["unconvertible"], "" if summary["unconvertible"] == 1 else "s",
+                          "is" if summary["unconvertible"] == 1 else "are"))
 
 
 def _matrix(sup, rfq_id: str):
-    responses = sup.responses_for(rfq_id)
-    stamp = "|".join("%s:%s" % (r.id, r.updated_at) for r in responses)
-    return _matrix_cached(rfq_id, stamp)
+    """Built fresh each render. It is a plain read over already-stored rows, and caching
+    it forced Streamlit to pickle live dataclasses, which it cannot do."""
+    return sup.build_comparison(rfq_id, display_currency=st.session_state.get(state.K_DISPLAY_CCY))
 
 
 # --------------------------------------------------------------------------- #
@@ -250,15 +282,24 @@ def _quote_detail(sup, matrix, cell) -> None:
         return
 
     if q.has_price:
-        left, right = st.columns(2)
-        with left:
-            st.markdown('<div class="rfq-field-label">Normalized</div>'
+        conv = cell.converted
+        showing_conversion = conv is not None and conv.is_conversion
+        cols = st.columns(3 if showing_conversion else 2)
+        if showing_conversion:
+            with cols[0]:
+                st.markdown('<div class="rfq-field-label">In %s</div><div class="rfq-field-value">%s %s</div>'
+                            % (esc(conv.currency), esc(conv.currency), esc("%.4f" % conv.amount)),
+                            unsafe_allow_html=True)
+        with cols[1 if showing_conversion else 0]:
+            st.markdown('<div class="rfq-field-label">Per piece, as they quoted it</div>'
                         '<div class="rfq-field-value">%s</div>'
                         % esc(q.normalized_price_text() or "not comparable"), unsafe_allow_html=True)
-        with right:
+        with cols[2 if showing_conversion else 1]:
             st.markdown('<div class="rfq-field-label">As quoted</div>'
                         '<div class="rfq-field-value">%s</div>' % esc(q.original_price_text()),
                         unsafe_allow_html=True)
+        if showing_conversion:
+            st.caption(conv.describe_rate())
         if q.normalization_note:
             st.caption(q.normalization_note)
     if q.discount.is_present:

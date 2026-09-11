@@ -40,6 +40,8 @@ class Settings:
     max_questions_first: int = 14
     max_questions_turn: int = 3
     max_open_questions: int = 14
+    #: Supplier extractions are independent subprocess calls, so a few run at once.
+    extraction_workers: int = 4          # RFQ_EXTRACTION_WORKERS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -56,4 +58,5 @@ class Settings:
         s.max_questions_first = _env_int("RFQ_MAX_QUESTIONS_FIRST", s.max_questions_first)
         s.max_questions_turn = _env_int("RFQ_MAX_QUESTIONS_TURN", s.max_questions_turn)
         s.max_open_questions = _env_int("RFQ_MAX_OPEN_QUESTIONS", s.max_open_questions)
+        s.extraction_workers = max(1, _env_int("RFQ_EXTRACTION_WORKERS", s.extraction_workers))
         return s

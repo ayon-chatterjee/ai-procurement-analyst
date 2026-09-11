@@ -74,6 +74,9 @@ Things worth looking at in the demo:
   figure without a weight the supplier never gave.
 - **Istanbul** sent a photograph. It is transcribed by Claude's vision and capped at 75%
   confidence, because optical reading can misread a digit.
+- Suppliers quote in different currencies. **Show prices in** converts them at a live
+  published rate, and every converted figure names the rate, the provider and the date
+  it was published, with the supplier's original figure kept beside it.
 - Every certification reads **claimed**, not verified, because no certificate file arrived.
 - Shenzhen's first quote contradicts itself on lead time (15 days on page 1, 25 on page 3).
   Both are kept. Their revision supersedes it without deleting it.
@@ -107,11 +110,14 @@ The model reports *observations*: what the supplier wrote, and where. Determinis
 decides what the application is willing to assert. That split is why:
 
 - a price whose evidence span cannot be found in the document is held for review;
+- a currency is converted only at a real published rate that is shown alongside it, and
+  a price whose currency the supplier never named is not converted at all;
 - a certification stays **claimed** until the certificate itself is among the documents;
 - a line the supplier did not price is **not quoted**, never `0`;
 - an ambiguous line match asks for confirmation instead of picking;
 - two contradictory statements are both kept, with their own evidence;
-- no currency is ever converted, and no exchange rate is ever invented.
+- no exchange rate is ever invented: if rates cannot be fetched, prices stay in the
+  currency each supplier used rather than being converted on a guess.
 
 ---
 
@@ -156,10 +162,13 @@ scoring: Phase 2 shows normalised prices and stops short of telling you who to p
   with no text layer is reported as unsupported rather than guessed at.
 - **Image reading** is genuine vision transcription and genuinely fallible. Values from a
   photograph are capped at 75% confidence and should be spot-checked.
-- **Cross-currency** comparison is not attempted. Prices stay in the currency each
-  supplier used.
-- **Extraction is slow**: roughly 30–90 seconds per supplier response, sequentially.
-  Reliability was preferred over parallelism.
+- **Cross-currency** comparison uses live mid-market rates from a free public endpoint
+  (`open.er-api.com`, with `frankfurter.app` as a fallback), cached for six hours. These
+  are reference rates, not the rate your bank will give you, and they exclude any fees.
+  A price whose currency the supplier never named is never converted.
+- **Extraction takes time**: roughly 30–90 seconds per supplier response. Responses are
+  processed four at a time (`RFQ_EXTRACTION_WORKERS`), so a five-supplier RFQ takes
+  around 90 seconds rather than six minutes.
 - The demo dataset is fabricated. Supplier names, contacts and prices are invented.
 
 ## Phase 3 readiness

@@ -215,6 +215,12 @@ class SupplierExtractor:
         deterministic matcher still runs, and unmatched lines simply need review."""
         if not raw_lines or not rfq.line_items:
             return []
+        # A second opinion is only worth a model call when the deterministic matcher is
+        # actually unsure. For dimensioned products it usually is not, and skipping the
+        # call removes about ten seconds per supplier without weakening any decision.
+        if self._all_lines_matched_confidently(rfq, raw_lines):
+            audit.append("Line matching resolved from dimensions alone; no model call was needed.")
+            return []
         try:
             data, rec = self._call(build_match_prompt(rfq, raw_lines), LINE_MATCH_SCHEMA,
                                    MATCH_SYSTEM_PROMPT, "supplier_line_match", MATCH_PROMPT_VERSION, response_id)
@@ -225,6 +231,22 @@ class SupplierExtractor:
             audit.append("Line matching by model unavailable (%s); fell back to dimension matching."
                          % type(e).__name__)
             return []
+
+    @staticmethod
+    def _all_lines_matched_confidently(rfq: RFQ, raw_lines: List[Dict[str, Any]]) -> bool:
+        """True when every supplier line has one clear, unrivalled deterministic match."""
+        from .line_matcher import STRONG, score_candidates
+        claimed = set()
+        for sl in raw_lines:
+            ranked = score_candidates(rfq, sl)
+            if not ranked or ranked[0].score < STRONG:
+                return False
+            if len(ranked) > 1 and ranked[1].score >= ranked[0].score - 0.02:
+                return False                      # two lines fit equally well
+            if ranked[0].line_item_id in claimed:
+                return False                      # two supplier lines want the same RFQ line
+            claimed.add(ranked[0].line_item_id)
+        return True
 
     # ------------------------------------------------------------------ #
     def _apply_response_meta(self, response: SupplierResponse, data: Dict[str, Any]) -> None:

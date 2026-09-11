@@ -114,16 +114,27 @@ class ScriptedAI:
         return "scripted-model"
 
     def complete_json(self, prompt, schema, system_prompt, tier="quality"):
+        """Serve the first queued payload that fits the schema being asked for.
+
+        Dispatching by shape rather than by position keeps tests independent of how many
+        calls the extractor decides to make - it skips the line-matching call whenever
+        dimensions already settle every line.
+        """
         from rfq_copilot.ai_service import AIResult, validate_against
         self.calls.append({"prompt": prompt, "system": system_prompt, "schema": schema})
         if not self.payloads:
             raise AssertionError("ScriptedAI ran out of payloads (call %d)" % len(self.calls))
-        data = self.payloads.pop(0)
-        if isinstance(data, Exception):
-            raise data
-        err = validate_against(schema, data)
-        assert err is None, "scripted payload is not schema-valid: %s" % err
-        return AIResult(data=data, raw="{}", provider=self.name, model="scripted-model", duration_ms=1)
+
+        chosen = None
+        for i, candidate in enumerate(self.payloads):
+            if isinstance(candidate, Exception) or validate_against(schema, candidate) is None:
+                chosen = self.payloads.pop(i)
+                break
+        if chosen is None:
+            raise AssertionError("No queued payload matches the requested schema (call %d)" % len(self.calls))
+        if isinstance(chosen, Exception):
+            raise chosen
+        return AIResult(data=chosen, raw="{}", provider=self.name, model="scripted-model", duration_ms=1)
 
     def health(self):
         return {"available": True, "authenticated": True, "detail": "scripted"}
