@@ -1,0 +1,23 @@
+From: sales@gujaratboxes.in
+To: procurement@buyer.example
+Subject: Re: RFQ 30 carton sizes
+Date: Mon, 21 Sep 2026 11:40:12 +0530
+
+Hi,
+
+We can offer the following from your list:
+  item 2  -  INR 28.56 per piece
+  item 4  -  INR 36.12 per piece
+  item 7  -  INR 47.04 per piece
+  item 10  -  INR 57.96 per piece
+  item 15  -  INR 75.60 per piece
+  item 21  -  INR 97.44 per piece
+  item 24  -  INR 108.36 per piece
+  item 28  -  INR 122.64 per piece
+
+MOQ 1000 each. Lead time 24 days. Ex works Ahmedabad.
+ISO available. We cannot offer the remaining sizes.
+
+Regards,
+Rakesh Patel
+Gujarat Boxes Pvt Ltd

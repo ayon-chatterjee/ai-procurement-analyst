@@ -52,6 +52,7 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .rfq-line { padding: .45rem 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
 .rfq-pending { display:inline-block; background:#FEF3C7; color:#92400E; font-size:.78rem; font-weight:600;
   padding:.14rem .55rem; border-radius:999px; margin:.1rem 0 .4rem 0; }
+.rfq-price { font-size: 1.15rem; font-weight: 700; color: var(--ink); }
 .rfq-muted, .rfq-muted * { color: #94A3B8 !important; }
 .rfq-muted div[data-testid="stExpander"] details { border-color: var(--line); background: transparent; }
 </style>

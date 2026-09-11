@@ -18,6 +18,8 @@ K_PREFILL = "prefill_text"
 K_FLASH = "flash"
 K_TARGET = "nav_target"
 K_DIAGNOSTICS = "show_diagnostics"
+K_PENDING_QUOTES = "pending_quotes_action"
+K_QUOTES_ERROR = "quotes_error"
 
 PAGES: Dict[str, Any] = {}   # filled by app.py: name -> st.Page
 
@@ -27,6 +29,22 @@ def get_service() -> RFQService:
     settings = Settings.from_env()
     repo = RFQRepository(settings.db_path)
     return RFQService(repo, get_ai_service(settings), settings)
+
+
+@st.cache_resource(show_spinner=False)
+def get_supplier_service() -> "SupplierService":
+    """Phase 2 service, sharing the Phase 1 repository and AI service."""
+    from rfq_copilot.supplier_service import SupplierService
+    base = get_service()
+    return SupplierService(base.repo, base.ai, base.settings)
+
+
+def queue_quotes(action: Dict[str, Any]) -> None:
+    st.session_state[K_PENDING_QUOTES] = action
+
+
+def take_pending_quotes() -> Optional[Dict[str, Any]]:
+    return st.session_state.pop(K_PENDING_QUOTES, None)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
