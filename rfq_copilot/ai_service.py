@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -32,6 +33,7 @@ class AIError(Exception):
     def __init__(self, message: str = "", raw: str = ""):
         super().__init__(message or self.user_message)
         self.raw = raw
+        self.rfq_id: Optional[str] = None   # set when the failure happened while creating an RFQ
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return super().__str__()
@@ -47,6 +49,18 @@ class AINotAuthenticated(AIError):
 
 class AITimeout(AIError):
     user_message = "The analysis took too long. Your answers have been saved. Try again."
+
+
+class AIUsageLimit(AIError):
+    """The Claude subscription is out of capacity for now. Retrying immediately will not help."""
+
+    user_message = "Your Claude usage limit has been reached. Your answers are saved; try again once it resets."
+
+    def __init__(self, message: str = "", raw: str = "", detail: str = ""):
+        super().__init__(message, raw)
+        self.detail = detail
+        if detail:
+            self.user_message = "%s (%s)" % (self.user_message.rstrip("."), detail) + "."
 
 
 class AITransient(AIError):
@@ -97,11 +111,18 @@ def validate_against(schema: Dict[str, Any], data: Any) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # Claude Code CLI provider
 # --------------------------------------------------------------------------- #
+def _reset_hint(text: str) -> str:
+    """Pull a 'resets 9pm (asia/calcutta)' style hint out of the CLI message, if present."""
+    m = re.search(r"resets?\s+[^\n·]{2,40}", text or "", re.I)
+    return m.group(0).strip().rstrip(".") if m else ""
+
+
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 _STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 _AUTH_MARKERS = ("not logged in", "please run /login", "not authenticated", "invalid api key", "authentication")
-_LIMIT_MARKERS = ("usage limit", "rate limit", "rate_limit", "overloaded", "capacity")
+_LIMIT_MARKERS = ("usage limit", "session limit", "rate limit", "rate_limit", "quota", "out of credit")
+_BUSY_MARKERS = ("overloaded", "capacity", "try again later", "503")
 _TRANSIENT_MARKERS = ("connection lost", "maximum number of turns", "api error", "timed out", "econnreset",
                       "failed to provide valid structured output")
 
@@ -201,7 +222,10 @@ class ClaudeCLIProvider(AIService):
             if any(m in joined for m in _AUTH_MARKERS):
                 raise AINotAuthenticated(raw=raw[:4000])
             if any(m in joined for m in _LIMIT_MARKERS):
-                raise AIUnavailable("Claude is rate-limited or at its usage limit right now. Try again shortly.", raw=raw[:4000])
+                raise AIUsageLimit("Claude usage limit reached: %s" % result_text.strip()[:200],
+                                   raw=raw[:4000], detail=_reset_hint(result_text))
+            if any(m in joined for m in _BUSY_MARKERS):
+                raise AIUnavailable("Claude is busy right now. Try again shortly.", raw=raw[:4000])
             if any(m in joined for m in _TRANSIENT_MARKERS):
                 raise AITransient("The Claude connection dropped mid-response: %s" % joined.strip()[:200], raw=raw[:4000])
             raise AIInvalidOutput("Claude CLI reported an error: %s" % (joined.strip()[:300] or "unknown"), raw=raw[:4000])

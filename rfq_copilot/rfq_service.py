@@ -84,11 +84,19 @@ class RFQService:
             raise RFQStateError("Please describe what you want to source.")
         rfq = RFQ(id=new_id("rfq"), fields=new_field_set(), status=RFQStatus.DRAFT, turn=0)
         rfq.title = text[:70]
+        # Compute readiness up front so the panel is honest even if the first AI turn fails.
+        rfq.completeness = guards.compute_completeness(rfq, None, 0)
         self.repo.save_rfq(rfq)
         msg = Message(id=new_id("msg"), rfq_id=rfq.id, turn=1, role=MessageRole.BUYER, kind="request", content=text,
                       payload={"text": text})
         self.repo.add_message(msg)
-        return self._run_first_turn(rfq, msg)
+        try:
+            return self._run_first_turn(rfq, msg)
+        except AIError as e:
+            # The request is already saved; tell the caller which RFQ to reopen so the buyer can
+            # retry instead of losing what they typed.
+            e.rfq_id = rfq.id
+            raise
 
     def _run_first_turn(self, rfq: RFQ, msg: Message) -> RFQ:
         prompt = build_first_turn_prompt(msg.content)

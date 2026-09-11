@@ -6,7 +6,8 @@ import unittest
 
 from rfq_copilot.ai_schemas import PING_SCHEMA, TURN_OUTPUT_SCHEMA
 from rfq_copilot.ai_service import (
-    AIInvalidOutput, AINotAuthenticated, AITimeout, AITransient, AIUnavailable, ClaudeCLIProvider, get_ai_service, validate_against,
+    AIInvalidOutput, AINotAuthenticated, AITimeout, AITransient, AIUnavailable, AIUsageLimit, ClaudeCLIProvider,
+    get_ai_service, validate_against,
 )
 from rfq_copilot.config import Settings
 from tests.helpers import load_fixture
@@ -78,6 +79,21 @@ class ClaudeCLIProviderTest(unittest.TestCase):
                    "modelUsage": {}, "terminal_reason": "api_error"}
         with self.assertRaises(AITransient):
             ClaudeCLIProvider(self.settings, runner=fake_runner(json.dumps(dropped))).complete_json("p", PING_SCHEMA, "s")
+
+    def test_session_limit_maps_to_a_usage_limit_with_its_reset_time(self):
+        env = {"is_error": True, "result": "you've hit your session limit · resets 9pm (asia/calcutta)",
+               "modelUsage": {}, "terminal_reason": "api_error"}
+        with self.assertRaises(AIUsageLimit) as ctx:
+            ClaudeCLIProvider(self.settings, runner=fake_runner(json.dumps(env))).complete_json("p", PING_SCHEMA, "s")
+        msg = ctx.exception.user_message
+        self.assertIn("usage limit", msg.lower())
+        self.assertIn("resets 9pm", msg, "the reset time is the actionable part")
+        self.assertNotIsInstance(ctx.exception, AIInvalidOutput)
+
+    def test_overloaded_is_unavailable_not_a_usage_limit(self):
+        env = {"is_error": True, "result": "API Error: service overloaded", "modelUsage": {}}
+        with self.assertRaises(AIUnavailable):
+            ClaudeCLIProvider(self.settings, runner=fake_runner(json.dumps(env))).complete_json("p", PING_SCHEMA, "s")
 
     def test_non_json_stdout(self):
         run = fake_runner("Something went wrong\n", returncode=0)

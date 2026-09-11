@@ -57,11 +57,12 @@ def _process_pending(svc) -> None:
             status.update(label="Analysis complete", state="complete", expanded=False)
             st.session_state.pop(state.K_ERROR, None)
         except AIError as e:
+            # The plain-English message goes to the buyer; the technical detail is already in the
+            # AI call log on the review page.
             status.update(label="Analysis did not complete", state="error", expanded=False)
-            detail = str(e)
-            st.session_state[state.K_ERROR] = e.user_message + ((" (%s)" % detail[:160]) if detail and detail != e.user_message else "")
-            if action.get("type") == "start" and action.get("rfq_id_hint"):
-                state.set_current(action["rfq_id_hint"])
+            st.session_state[state.K_ERROR] = e.user_message
+            if getattr(e, "rfq_id", None):
+                state.set_current(e.rfq_id)   # keep the buyer's request open so they can retry it
         except RFQStateError as e:
             status.update(label="Nothing to analyze", state="error", expanded=False)
             st.session_state[state.K_ERROR] = str(e)
@@ -81,11 +82,16 @@ def _render_hero(svc) -> None:
     if st.session_state.get(state.K_ERROR):
         st.error(st.session_state.pop(state.K_ERROR))
 
+    st.session_state.setdefault("start_text", "")
     st.caption("Try an example")
     picked = st.pills("Try an example", list(EXAMPLES), selection_mode="single", key="example_pick", label_visibility="collapsed")
     if picked and picked != st.session_state.get("_last_example"):
+        # Writing a widget's key only takes effect when the widget is created fresh, so rerun
+        # before the text area below is instantiated. Without this the chip silently does nothing
+        # once the box has been rendered at least once.
         st.session_state["_last_example"] = picked
         st.session_state["start_text"] = EXAMPLES[picked]
+        st.rerun()
     with st.form("start_form", border=False):
         text = st.text_area("What do you need to source?", key="start_text", height=110,
                             placeholder="e.g. I need corrugated carton boxes for shipping ceramic mugs to our Mumbai warehouse",
@@ -130,8 +136,9 @@ def _render_header(rfq: RFQ) -> None:
     c1, c2 = st.columns([6, 1.3])
     with c1:
         st.markdown('<div class="rfq-kicker">RFQ draft</div><div class="rfq-title">%s</div>' % esc(rfq.title or rfq.product), unsafe_allow_html=True)
-        st.markdown('<div class="rfq-sub">%s · %s%s &nbsp; %s</div>' % (
-            esc(rfq.product), esc(rfq.category), (" · " + esc(rfq.product_type)) if rfq.product_type else "", status_badge(rfq)), unsafe_allow_html=True)
+        bits = [esc(x) for x in (rfq.product, rfq.category, rfq.product_type) if x]
+        subtitle = " · ".join(bits) if bits else "Not classified yet"
+        st.markdown('<div class="rfq-sub">%s &nbsp; %s</div>' % (subtitle, status_badge(rfq)), unsafe_allow_html=True)
     with c2:
         if st.button("New RFQ", key="new_rfq_btn", use_container_width=True):
             state.set_current(None)

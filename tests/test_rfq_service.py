@@ -125,6 +125,30 @@ class ServiceFlowTest(unittest.TestCase):
         self.assertFalse(svc.has_pending_turn(rfq))
         self.assertEqual(rfq.turn, 2)
 
+    def test_failed_first_turn_keeps_the_request_and_names_the_rfq_to_retry(self):
+        from rfq_copilot.ai_service import AIUsageLimit
+        ai = StubAIService(outputs=[AIUsageLimit("limit reached", detail="resets 9pm")])
+        svc = make_service(ai)
+        with self.assertRaises(AIUsageLimit) as ctx:
+            svc.start_rfq("I need steel construction brackets.")
+        rfq_id = getattr(ctx.exception, "rfq_id", None)
+        self.assertIsNotNone(rfq_id, "the caller needs to know which RFQ to reopen")
+        rfq = svc.get(rfq_id)
+        self.assertEqual(rfq.status, RFQStatus.DRAFT)
+        self.assertEqual(rfq.turn, 0)
+        self.assertFalse(rfq.completeness.ready_to_send)
+        self.assertIn("not been identified", rfq.completeness.explanation,
+                      "an un-analysed draft still explains why it is not ready")
+        self.assertTrue(svc.has_pending_turn(rfq))
+        self.assertEqual(svc.transcript(rfq_id)[0].content, "I need steel construction brackets.")
+        self.assertIn("resets 9pm", ctx.exception.user_message)
+        # retrying the first turn works once the limit clears
+        ai.outputs = [FIRST]
+        rfq = svc.retry_last_turn(rfq_id)
+        self.assertTrue(rfq.is_classified)
+        self.assertEqual(rfq.turn, 1)
+        self.assertFalse(svc.has_pending_turn(rfq))
+
     def test_invalid_output_is_retried_with_the_validation_error(self):
         from rfq_copilot.ai_service import AIInvalidOutput
         ai = StubAIService(outputs=[AIInvalidOutput("bad json"), FIRST])

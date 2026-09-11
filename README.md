@@ -229,6 +229,9 @@ Exits non-zero if any check fails.
 
 * One buyer, one machine, no accounts. The SQLite file is local and `data/` is git-ignored.
 * A Sonnet turn takes 25–60 seconds. That is real reasoning, not a loading animation.
+* A Claude subscription has session limits. When one is reached the app says so and names the reset
+  time; answers are saved and the turn can be retried afterwards. `scripts/smoke.py` stops with exit
+  code 2 and reports which scenarios had already run.
 * Claude occasionally returns a schema-valid **placeholder** object when it exhausts its internal
   structured-output attempts. A guard rejects any empty analysis of a non-empty buyer turn and retries
   with a stricter instruction, so a placeholder is never applied to an RFQ. Dropped connections and

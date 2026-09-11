@@ -20,7 +20,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from rfq_copilot.ai_service import get_ai_service  # noqa: E402
+from rfq_copilot.ai_service import AIError, AIUsageLimit, get_ai_service  # noqa: E402
 from rfq_copilot.config import Settings  # noqa: E402
 from rfq_copilot.guards import content_tokens, similarity  # noqa: E402
 from rfq_copilot.persistence import RFQRepository  # noqa: E402
@@ -61,6 +61,20 @@ def show(rfq, svc) -> None:
         print("  guards: %s" % guard_notes[-1].content.replace("\n", "\n          "))
 
 
+def run(label: str, fn):
+    """Run one scenario; a usage limit stops the suite cleanly instead of dumping a traceback."""
+    try:
+        return fn()
+    except AIUsageLimit as e:
+        print("\n  STOPPED  %s: %s" % (label, e.user_message))
+        print("  The scenarios that already ran are reported above. Re-run after the limit resets.")
+        raise SystemExit(2)
+    except AIError as e:
+        print("\n  ERROR    %s: %s" % (label, e.user_message))
+        failures.append("%s raised %s" % (label, type(e).__name__))
+        raise SystemExit(1)
+
+
 def main() -> int:
     keep = "--keep-db" in sys.argv
     save = "--save-fixtures" in sys.argv
@@ -77,7 +91,7 @@ def main() -> int:
     # ---------------------------------------------------------------- carton
     t = time.time()
     print("\n[1] I need corrugated carton boxes.")
-    carton = svc.start_rfq("I need corrugated carton boxes.")
+    carton = run("scenario 1", lambda: svc.start_rfq("I need corrugated carton boxes."))
     print("  (%.1fs)" % (time.time() - t))
     show(carton, svc)
     check("carton" in carton.product.lower() or "box" in carton.product.lower(), "carton product recognised")
@@ -93,7 +107,7 @@ def main() -> int:
     # --------------------------------------------------------------- bracket
     t = time.time()
     print("\n[2] I need steel construction brackets.")
-    bracket = svc.start_rfq("I need steel construction brackets.")
+    bracket = run("scenario 2", lambda: svc.start_rfq("I need steel construction brackets."))
     print("  (%.1fs)" % (time.time() - t))
     show(bracket, svc)
     check(bracket.category.lower() != carton.category.lower(), "categories differ (%s vs %s)" % (carton.category, bracket.category))
@@ -114,7 +128,7 @@ def main() -> int:
     t = time.time()
     print("\n[3] Carton follow-up:\n%s" % FREE_TEXT.replace("\n", "\n      "))
     before_open = {q.id: q for q in carton.open_questions()}
-    carton = svc.submit_turn(carton.id, answers={}, skipped=[], free_text=FREE_TEXT)
+    carton = run("scenario 3", lambda: svc.submit_turn(carton.id, answers={}, skipped=[], free_text=FREE_TEXT))
     print("  (%.1fs)" % (time.time() - t))
     show(carton, svc)
     check(len(carton.line_items) == 7, "seven line items created (%d)" % len(carton.line_items))
@@ -146,7 +160,7 @@ def main() -> int:
     # ---------------------------------------------- ambiguity is asked, not guessed
     t = time.time()
     print("\n[4] I need large carton boxes, about 5,000 of them, delivered to India.")
-    vague = svc.start_rfq("I need large carton boxes, about 5,000 of them, delivered to India.")
+    vague = run("scenario 4", lambda: svc.start_rfq("I need large carton boxes, about 5,000 of them, delivered to India."))
     print("  (%.1fs)" % (time.time() - t))
     show(vague, svc)
     all_values = " ".join(str(fv.value) for fv in vague.fields.values() if fv.value not in (None, "", []))
@@ -168,7 +182,7 @@ def main() -> int:
     # --------------------------------------------------- explicit buyer correction
     t = time.time()
     print("\n[5] Correction: \"Actually, make that 8,000 pieces.\"")
-    vague = svc.submit_turn(vague.id, answers={}, skipped=[], free_text="Actually, make that 8,000 pieces.")
+    vague = run("scenario 5", lambda: svc.submit_turn(vague.id, answers={}, skipped=[], free_text="Actually, make that 8,000 pieces."))
     print("  (%.1fs)" % (time.time() - t))
     q_field = vague.fields["quantity"]
     print("  quantity: %s %s | status=%s | history=%s" % (q_field.value, q_field.unit or "", q_field.status.value,
