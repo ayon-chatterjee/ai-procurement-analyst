@@ -160,3 +160,59 @@ class TrustLabelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnswerCollectionTest(unittest.TestCase):
+    """The glue between the question-card widgets and the service. A silent break here
+    would drop a buyer's typed answers, so it is tested without a browser."""
+
+    def _questions(self):
+        return [
+            Question(id="q_a", category=Section.TECHNICAL, question="Flute?", field_key="flute",
+                     answer_type=AnswerType.CHOICE, suggested_options=["B", "C", "BC"]),
+            Question(id="q_b", category=Section.COMMERCIAL, question="Quantity?", field_key="quantity", answer_type=AnswerType.NUMBER),
+            Question(id="q_c", category=Section.LOGISTICS, question="Destination?", field_key="destination"),
+            Question(id="q_d", category=Section.QUALITY, question="Certificates?", field_key="certifications"),
+        ]
+
+    def _collect(self, state):
+        from ui import components
+
+        class _Stub(object):
+            session_state = state
+        original = components.st
+        components.st = _Stub()
+        try:
+            return components.collect_answers(self._questions(), turn=3)
+        finally:
+            components.st = original
+
+    def test_typed_pill_and_skip_inputs_are_all_collected(self):
+        out = self._collect({
+            "opt_q_a_3": "BC",                        # chose a suggested option
+            "ans_q_b_3": " 2,000 ",                   # typed, needs trimming
+            "skip_q_c_3": True,                       # skipped
+            "ans_q_d_3": "",                          # untouched
+        })
+        self.assertEqual(out["answers"], {"q_a": "BC", "q_b": "2,000"})
+        self.assertEqual(out["skipped"], ["q_c"])
+
+    def test_typed_text_wins_over_a_selected_pill(self):
+        out = self._collect({"opt_q_a_3": "B", "ans_q_a_3": "E flute, single wall"})
+        self.assertEqual(out["answers"], {"q_a": "E flute, single wall"})
+
+    def test_an_answer_beats_a_stray_skip_tick(self):
+        out = self._collect({"ans_q_c_3": "Mumbai", "skip_q_c_3": True})
+        self.assertEqual(out["answers"], {"q_c": "Mumbai"})
+        self.assertEqual(out["skipped"], [])
+
+    def test_widget_keys_are_scoped_per_turn_so_answers_never_leak(self):
+        from ui.components import question_widget_keys
+        q = self._questions()[0]
+        self.assertNotEqual(question_widget_keys(q, 3), question_widget_keys(q, 4))
+        for key in question_widget_keys(q, 3).values():
+            self.assertIn("q_a", key)
+            self.assertTrue(key.endswith("_3"))
+
+    def test_nothing_selected_yields_nothing(self):
+        self.assertEqual(self._collect({}), {"answers": {}, "skipped": []})

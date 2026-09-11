@@ -171,7 +171,7 @@ rfq_copilot/
 ui/
   state.py  theme.py  components.py  page_copilot.py  page_review.py  page_saved.py
 scripts/smoke.py            real-CLI end-to-end intelligence test
-tests/                      63 unit tests (stdlib unittest)
+tests/                      82 unit tests (stdlib unittest)
 ```
 
 ---
@@ -184,12 +184,22 @@ Unit tests use the standard library only, and a stub AI service. They never touc
 python3 -m unittest discover -s tests -t .
 ```
 
-Covered: schema JSON round-trip and enum tolerance; the field registry; SQLite save/load/list/cascade;
-every guard (evidence downgrade, overwrite refusal, correction vs conflict, unknown preservation,
-N/A justification, seven-line-item handling, per-line quantity semantics, question dedupe and caps,
-score clamping, AI readiness override); service flow (persistence before the AI call, answers surviving
-a timeout, retry behaviour, manual edits as buyer facts, supplier-ready gating); and the CLI provider
-(argv shape, `CLAUDECODE` scrubbing, envelope parsing, auth / transient / timeout / schema-violation mapping).
+What the 82 tests cover:
+
+* **Schema** — JSON round-trip, tolerance of unknown/missing keys, enum fallbacks, value formatting.
+* **Field registry** — unique keys, valid sections, everything starts missing.
+* **Persistence** — save/load/list ordering, messages, AI-call audit, cascade delete, survives reopen.
+* **Guards** — evidence downgrade, overwrite refusal, correction vs conflict, unknown preservation,
+  N/A justification, registry type coercion, seven-line-item handling, per-line quantity semantics
+  (including "2,000 each" vs a stated total), question dedupe and caps, standard-question safety net,
+  score clamping, and the AI readiness claim being overridden.
+* **Service** — buyer input persisted before the AI call, answers surviving a timeout, retry of
+  transient and invalid responses, rejection of placeholder responses, manual edits as buyer facts,
+  supplier-ready gating, and a failed first turn staying recoverable.
+* **CLI provider** — argv shape, `CLAUDECODE` scrubbing, envelope parsing, and the mapping of auth,
+  usage-limit, transient, timeout and schema-violation failures.
+* **Trust labels and input glue** — an AI recommendation is never labelled as buyer input, and the
+  question-card widgets hand the right answers, pills and skips to the service.
 
 ### Real-model smoke test
 
