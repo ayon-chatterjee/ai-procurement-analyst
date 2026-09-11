@@ -143,6 +143,10 @@ code decides what is allowed to change.
 * **Readiness guard** — `ready_to_send` is false while any required field is missing, a
   conflict is open, a line item is incomplete, or a required question is unanswered. The
   model's own `score` and `ready_to_send` are kept as `ai_score` / `ai_ready_claim` for audit only.
+* **Plausibility guard** — an empty analysis of a substantial buyer turn is rejected and retried,
+  because the CLI emits placeholder objects when it runs out of structured-output attempts.
+* **Type guard** — for a universal field the registry decides the value type, so a quantity the
+  model labels as text ("8,000 units") still stores the number 8,000 with the unit printed once.
 
 ### Field states
 
@@ -212,7 +216,7 @@ Exits non-zero if any check fails.
 | `RFQ_AI_MODEL` | `sonnet` | Model for RFQ turns |
 | `RFQ_AI_FAST_MODEL` | `haiku` | Model for the lightweight health call |
 | `RFQ_AI_TIMEOUT` | `180` | Seconds per CLI call |
-| `RFQ_AI_EFFORT` | `low` | CLI reasoning effort; `default` gives deeper but much slower turns |
+| `RFQ_AI_EFFORT` | `medium` | CLI reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`); `low` is faster but degrades on complex turns |
 | `RFQ_AI_MAX_TURNS` | `6` | Internal CLI turn budget (structured output arrives as a tool call) |
 | `RFQ_CLAUDE_BIN` | `claude` | Path to the CLI |
 | `RFQ_DB_PATH` | `data/rfq_copilot.db` | SQLite file, resolved against the repo root |
@@ -225,12 +229,18 @@ Exits non-zero if any check fails.
 
 * One buyer, one machine, no accounts. The SQLite file is local and `data/` is git-ignored.
 * A Sonnet turn takes 25–60 seconds. That is real reasoning, not a loading animation.
-* If Claude drops the connection mid-response or exhausts its internal turn budget, the turn is
-  retried once automatically; a further failure surfaces a retry button with the buyer's answers intact.
+* Claude occasionally returns a schema-valid **placeholder** object when it exhausts its internal
+  structured-output attempts. A guard rejects any empty analysis of a non-empty buyer turn and retries
+  with a stricter instruction, so a placeholder is never applied to an RFQ. Dropped connections and
+  exhausted turn budgets are retried the same way; a further failure surfaces a retry button with the
+  buyer's answers intact.
 * The completeness score is a deterministic weighting (required 3, recommended 1, optional 0,
   not-applicable excluded). It is a progress signal, not a quality judgement.
 * Line items edited in the review table have their specifications re-parsed from
   `Name: value; Name: value` text, so free-form spec text collapses into one attribute.
+* Question wording and field keys come from the model, so two RFQs for the same product can name
+  the same concept differently (`board_grade` vs `board_grade_ect`). Guards dedupe by field key and
+  by wording similarity, but they do not force a shared vocabulary.
 * Questions are capped, so a very complex product may need an extra turn or two to reach readiness.
 * The AI's own readiness claim is recorded but never displayed as the verdict, by design.
 

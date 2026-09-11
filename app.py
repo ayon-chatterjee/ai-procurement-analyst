@@ -13,7 +13,8 @@ from ui.theme import inject_css
 st.set_page_config(page_title="AI RFQ Copilot", page_icon="📦", layout="wide", initial_sidebar_state="expanded")
 inject_css()
 
-copilot = st.Page(page_copilot.render, title="Copilot", icon=":material/auto_awesome:", url_path="copilot", default=True)
+# The default page is served at "/" — Streamlit ignores url_path there, so do not set one.
+copilot = st.Page(page_copilot.render, title="Copilot", icon=":material/auto_awesome:", default=True)
 review = st.Page(page_review.render, title="Review RFQ", icon=":material/fact_check:", url_path="review")
 saved = st.Page(page_saved.render, title="Saved RFQs", icon=":material/folder_open:", url_path="saved")
 state.PAGES.update({"copilot": copilot, "review": review, "saved": saved})

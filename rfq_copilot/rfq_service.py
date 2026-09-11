@@ -92,7 +92,7 @@ class RFQService:
 
     def _run_first_turn(self, rfq: RFQ, msg: Message) -> RFQ:
         prompt = build_first_turn_prompt(msg.content)
-        out = self._call_ai("first_turn", prompt, rfq, turn=1)
+        out = self._call_ai("first_turn", prompt, rfq, turn=1, turn_text=msg.content)
         rfq.turn = 1
         self._apply_turn_output(rfq, out, msg, turn_text=msg.content, is_first=True)
         self.repo.save_rfq(rfq)
@@ -132,7 +132,7 @@ class RFQService:
         self.repo.save_rfq(rfq)
 
         prompt = build_turn_prompt(rfq, answers, skipped, free_text)
-        out = self._call_ai("turn", prompt, rfq, turn=turn)
+        out = self._call_ai("turn", prompt, rfq, turn=turn, turn_text=turn_text or msg.content)
         self._apply_turn_output(rfq, out, msg, turn_text=turn_text or msg.content, is_first=False)
         self.repo.save_rfq(rfq)
         return rfq
@@ -149,8 +149,9 @@ class RFQService:
         p = msg.payload or {}
         answers, skipped, free_text = dict(p.get("answers") or {}), list(p.get("skipped") or []), str(p.get("free_text") or "")
         prompt = build_turn_prompt(rfq, answers, skipped, free_text)
-        out = self._call_ai("turn", prompt, rfq, turn=rfq.turn)
-        self._apply_turn_output(rfq, out, msg, turn_text=str(p.get("turn_text") or msg.content), is_first=False)
+        replay_text = str(p.get("turn_text") or msg.content)
+        out = self._call_ai("turn", prompt, rfq, turn=rfq.turn, turn_text=replay_text)
+        self._apply_turn_output(rfq, out, msg, turn_text=replay_text, is_first=False)
         self.repo.save_rfq(rfq)
         return rfq
 
@@ -162,6 +163,13 @@ class RFQService:
         return msgs[-1].role == MessageRole.BUYER
 
     # ----------------------------------------------------------- manual edits
+    def recompute(self, rfq_id: str) -> RFQ:
+        """Re-run the deterministic layer only (no AI). Used after external edits or a rules change."""
+        rfq = self.get(rfq_id)
+        self._recompute(rfq)
+        self.repo.save_rfq(rfq)
+        return rfq
+
     def set_field(self, rfq_id: str, key: str, value: Any, unit: Optional[str] = None, note: Optional[str] = None) -> RFQ:
         rfq = self.get(rfq_id)
         self._assert_editable(rfq)
@@ -381,7 +389,23 @@ class RFQService:
             self.repo.add_message(Message(id=new_id("msg"), rfq_id=rfq.id, turn=turn, role=MessageRole.SYSTEM, kind="guards",
                                           content="\n".join(audit), payload={"notes": audit}))
 
-    def _call_ai(self, call_type: str, prompt: str, rfq: RFQ, turn: int) -> Dict[str, Any]:
+    @staticmethod
+    def _is_degenerate(out: Dict[str, Any], turn_text: str) -> bool:
+        """A substantial buyer turn that yields no extraction, no questions and no answers is
+        not an analysis. The CLI emits placeholder objects when it exhausts its structured-output
+        attempts, and those must never be applied to an RFQ."""
+        if len((turn_text or "").strip()) < 40:
+            return False
+        li = out.get("line_items") or {}
+        produced = (len(out.get("field_updates") or []) + len(out.get("applicability_updates") or [])
+                    + len(li.get("items") or []) + len(out.get("answered_questions") or [])
+                    + len(out.get("new_questions") or []))
+        if produced > 0:
+            return False
+        msg = (out.get("assistant_message") or "").strip()
+        return len(msg) < 25 or msg.lower() in ("test", "ok", "done", "n/a")
+
+    def _call_ai(self, call_type: str, prompt: str, rfq: RFQ, turn: int, turn_text: str = "") -> Dict[str, Any]:
         """One structured call; retry once on a dropped connection or invalid output. Always audited."""
         attempt_prompt = prompt
         last_err: Optional[AIError] = None
@@ -389,6 +413,15 @@ class RFQService:
             started = utc_now()
             try:
                 res = self.ai.complete_json(attempt_prompt, TURN_OUTPUT_SCHEMA, SYSTEM_PROMPT, tier="quality")
+                if self._is_degenerate(res.data, turn_text):
+                    err = AIInvalidOutput("The model returned an empty analysis of a non-empty buyer turn.", raw=res.raw)
+                    self._log_call(call_type, attempt_prompt, rfq, turn, res, err, started)
+                    last_err = err
+                    attempt_prompt = prompt + (
+                        "\n\nPREVIOUS ATTEMPT RETURNED AN EMPTY RESULT. The buyer's text above contains real information. "
+                        "Extract every fact it states into field_updates and line_items with verbatim evidence, map it onto the open "
+                        "questions via answered_questions, and write a real assistant_message. Placeholder values are not acceptable.")
+                    continue
                 self._log_call(call_type, attempt_prompt, rfq, turn, res, None, started)
                 return res.data
             except AITransient as e:
@@ -411,7 +444,7 @@ class RFQService:
             id=new_id("call"), rfq_id=rfq.id, turn=turn, call_type=call_type,
             provider=getattr(self.ai, "name", "unknown"), model=(res.model if res else getattr(self.ai, "model_for", lambda t: "?")("quality")),
             prompt_version=PROMPT_VERSION, prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
-            prompt_chars=len(prompt), duration_ms=res.duration_ms if res else 0, ok=res is not None,
+            prompt_chars=len(prompt), duration_ms=res.duration_ms if res else 0, ok=(res is not None and err is None),
             schema_valid=bool(res and res.schema_valid), error=(type(err).__name__ + ": " + str(err)) if err else None,
             raw_response=(res.raw if res else (err.raw if err else ""))[:200000],
             prompt_text=prompt if self.settings.log_prompts else None, created_at=started,

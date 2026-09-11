@@ -1,12 +1,11 @@
 """Reusable UI pieces. Render state only; every action goes through RFQService."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
 
-from rfq_copilot.ai_service import AIError, AINotAuthenticated, AITimeout, AIUnavailable
 from rfq_copilot.schema import (
     RFQ, SECTION_LABELS, FieldStatus, FieldValue, Importance, Question, RFQStatus, Section, Source,
 )
@@ -217,16 +216,3 @@ def render_resume_hint(svc, key_prefix: str, on_open) -> bool:
     return True
 
 
-# --------------------------------------------------------------------------- #
-# Errors
-# --------------------------------------------------------------------------- #
-def error_message(err: Exception) -> str:
-    if isinstance(err, AIError):
-        return err.user_message
-    return "Something went wrong: %s" % err
-
-
-def render_ai_error(text: str, retry_key: str, on_retry) -> None:
-    st.error(text)
-    if st.button("Try again", key=retry_key, type="primary"):
-        on_retry()

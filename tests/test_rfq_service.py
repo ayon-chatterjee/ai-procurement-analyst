@@ -195,6 +195,52 @@ class ServiceFlowTest(unittest.TestCase):
         self.assertEqual(rows[0].id, rfq.id)
         self.assertEqual(rows[0].product, "Corrugated Carton Boxes")
 
+    def test_placeholder_response_is_rejected_and_retried(self):
+        """The CLI can emit a schema-valid placeholder when it exhausts its structured-output
+        attempts. Applying that would silently wipe a buyer's turn."""
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        degenerate = base_turn_output(assistant_message="test",
+                                      completeness={"score": 10, "ready_to_send": False, "missing_required_fields": [],
+                                                    "recommended_fields": [], "open_ambiguities": [], "explanation": "test"})
+        good = base_turn_output(assistant_message="Got it — seven sizes at 2,000 each, shipping to Mumbai.",
+                                line_items={"mode": "replace", "items": [line("Carton", s_, 2000.0, s_) for s_ in SIZES]},
+                                field_updates=[fu("destination", "Mumbai", "Ship to Mumbai", section="logistics")])
+        ai.outputs = [degenerate, good]
+        rfq = svc.submit_turn(rfq.id, answers={}, skipped=[], free_text=SIZE_TEXT)
+        self.assertEqual(len(rfq.line_items), 7, "the retry's real analysis was applied")
+        self.assertTrue(rfq.fields["destination"].is_filled)
+        calls = svc.ai_calls(rfq.id)
+        self.assertFalse(calls[-2].ok)
+        self.assertIn("empty analysis", calls[-2].error)
+        self.assertIn("PREVIOUS ATTEMPT RETURNED AN EMPTY RESULT", ai.calls[-1]["prompt"])
+
+    def test_empty_result_is_allowed_for_a_trivial_turn(self):
+        """A short answer like "no" legitimately produces little; do not fight it."""
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        q = [x for x in rfq.open_questions() if x.field_key == "printing"][0]
+        ai.outputs = [base_turn_output(assistant_message="Noted.")]
+        rfq = svc.submit_turn(rfq.id, answers={q.id: "no"}, skipped=[], free_text="")
+        self.assertEqual(len(ai.calls), 2, "no retry for a short turn")
+        self.assertEqual(rfq.question(q.id).status, QuestionStatus.ANSWERED)
+
+    def test_recompute_refreshes_the_deterministic_layer_without_an_ai_call(self):
+        ai = StubAIService(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        calls_before = len(ai.calls)
+        stored = svc.get(rfq.id)
+        stored.completeness.score = 999
+        stored.completeness.explanation = "stale"
+        svc.repo.save_rfq(stored)
+        rfq = svc.recompute(rfq.id)
+        self.assertEqual(len(ai.calls), calls_before, "recompute must not call the model")
+        self.assertLessEqual(rfq.completeness.score, 100)
+        self.assertNotEqual(rfq.completeness.explanation, "stale")
+
     def test_empty_input_rejected(self):
         svc = make_service(StubAIService(outputs=[]))
         with self.assertRaises(RFQStateError):

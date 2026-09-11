@@ -102,7 +102,8 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 _STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 _AUTH_MARKERS = ("not logged in", "please run /login", "not authenticated", "invalid api key", "authentication")
 _LIMIT_MARKERS = ("usage limit", "rate limit", "rate_limit", "overloaded", "capacity")
-_TRANSIENT_MARKERS = ("connection lost", "maximum number of turns", "api error", "timed out", "econnreset")
+_TRANSIENT_MARKERS = ("connection lost", "maximum number of turns", "api error", "timed out", "econnreset",
+                      "failed to provide valid structured output")
 
 
 class ClaudeCLIProvider(AIService):
@@ -111,7 +112,7 @@ class ClaudeCLIProvider(AIService):
     def __init__(self, settings: Settings, runner: Optional[Runner] = None):
         self.settings = settings
         self._run: Runner = runner or subprocess.run
-        self.effort = os.environ.get("RFQ_AI_EFFORT", "low").strip() or "low"
+        self.effort = os.environ.get("RFQ_AI_EFFORT", "medium").strip() or "medium"
         self.max_turns = os.environ.get("RFQ_AI_MAX_TURNS", "6").strip() or "6"
 
     # -- public -------------------------------------------------------------

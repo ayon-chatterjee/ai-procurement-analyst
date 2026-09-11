@@ -140,6 +140,16 @@ def parse_value(value: Any, kind: ValueKind) -> Tuple[Any, ValueKind]:
     return text, kind
 
 
+def _strip_trailing_unit(value: str, unit: str) -> str:
+    """'8,000 units' + unit 'units' -> '8,000', so the UI never prints the unit twice."""
+    v, u = value.strip(), unit.strip()
+    if u and v.lower().endswith(u.lower()) and len(v) > len(u):
+        trimmed = v[: -len(u)].strip(" ,")
+        if trimmed:
+            return trimmed
+    return v
+
+
 def values_equal(a: Any, b: Any) -> bool:
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(float(a) - float(b)) < 1e-9
@@ -214,9 +224,13 @@ def apply_field_updates(rfq: RFQ, updates: List[Dict[str, Any]], turn_text: str,
         status = u.get("status") or "provided"
         evidence = u.get("evidence")
         note = (u.get("note") or "").strip() or None
-        kind = _enum_or(ValueKind, u.get("value_kind"), fv.value_kind)
-        parsed, kind = parse_value(u.get("value"), kind)
+        # For a universal field the registry is authoritative about the type: the model sometimes
+        # sends a numeric field as text ("8,000 units"), which must still store a number.
+        kind = spec.value_kind if spec is not None else _enum_or(ValueKind, u.get("value_kind"), fv.value_kind)
         unit = (u.get("unit") or "").strip() or None
+        parsed, kind = parse_value(u.get("value"), kind)
+        if isinstance(parsed, str) and unit:
+            parsed = _strip_trailing_unit(parsed, unit)
 
         # ---- evidence guard --------------------------------------------------
         ref: Optional[str] = None
@@ -710,6 +724,16 @@ def reconcile_questions(rfq: RFQ, ai_answered: List[Dict[str, Any]], new_questio
 _WEIGHT = {Importance.REQUIRED: 3, Importance.RECOMMENDED: 1, Importance.OPTIONAL: 0, Importance.NOT_APPLICABLE: 0}
 
 
+def join_labels(labels: List[str], limit: int = 4) -> str:
+    """Readable list that never claims to show more than it does."""
+    items = [str(x) for x in labels if str(x).strip()]
+    if not items:
+        return ""
+    if len(items) <= limit:
+        return ", ".join(items[:-1]) + (" and " + items[-1] if len(items) > 1 else items[0]) if len(items) > 1 else items[0]
+    return "%s and %d more" % (", ".join(items[:limit]), len(items) - limit)
+
+
 def line_item_gaps(rfq: RFQ) -> List[str]:
     gaps: List[str] = []
     for li in rfq.line_items:
@@ -771,19 +795,20 @@ def compute_completeness(rfq: RFQ, ai_completeness: Optional[Dict[str, Any]], tu
     if ready:
         expl = "Ready to send. Suppliers have what they need to quote accurately."
         if recommended:
-            expl += " Answering %d more recommended item%s (%s) could sharpen pricing." % (
-                len(recommended), "" if len(recommended) == 1 else "s", ", ".join(recommended[:4]))
+            expl += " Answering %s could sharpen pricing." % join_labels(recommended)
     else:
         if not rfq.is_classified:
             expl = "Not ready: the product has not been identified yet."
         else:
             parts = []
             if missing_required:
-                parts.append("%d critical requirement%s missing (%s)" % (len(missing_required), "" if len(missing_required) == 1 else "s", ", ".join(missing_required[:4])))
+                parts.append("%d critical requirement%s missing (%s)" % (
+                    len(missing_required), "" if len(missing_required) == 1 else "s", join_labels(missing_required)))
             if gaps:
-                parts.append("line items incomplete (%s)" % ", ".join(gaps[:3]))
+                parts.append("line items incomplete (%s)" % join_labels(gaps, 3))
             if conflicts:
-                parts.append("%d conflict%s to resolve (%s)" % (len(conflicts), "" if len(conflicts) == 1 else "s", ", ".join(conflicts)))
+                parts.append("%d conflict%s to resolve (%s)" % (
+                    len(conflicts), "" if len(conflicts) == 1 else "s", join_labels(conflicts)))
             if required_questions:
                 parts.append("%d required question%s unanswered" % (len(required_questions), "" if len(required_questions) == 1 else "s"))
             expl = "I recommend answering %d more item%s before sending this RFQ because %s could materially affect supplier pricing: %s." % (

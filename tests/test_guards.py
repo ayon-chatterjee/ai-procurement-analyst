@@ -59,6 +59,22 @@ class FieldUpdateGuardTest(unittest.TestCase):
         self.assertEqual(rfq.fields["quantity"].value, 30000.0)
         self.assertEqual(rfq.fields["quantity"].display_value(), "30,000 pcs")
 
+    def test_registry_type_wins_when_the_model_sends_a_number_as_text(self):
+        rfq = rfq_with()
+        # the model labels a numeric universal field as text and repeats the unit in the value
+        guards.apply_field_updates(rfq, [fu("quantity", "8,000 units", "make that 8,000 pieces", section="commercial",
+                                            value_kind="text", unit="units")], "Actually, make that 8,000 pieces.", "msg:2", 2)
+        q = rfq.fields["quantity"]
+        self.assertEqual(q.value, 8000.0)
+        self.assertEqual(q.value_kind, ValueKind.NUMBER)
+        self.assertEqual(q.display_value(), "8,000 units", "the unit is printed once")
+
+    def test_trailing_unit_is_not_duplicated_for_text_fields(self):
+        self.assertEqual(guards._strip_trailing_unit("8,000 units", "units"), "8,000")
+        self.assertEqual(guards._strip_trailing_unit("32 ECT", "ECT"), "32")
+        self.assertEqual(guards._strip_trailing_unit("units", "units"), "units", "never strip to nothing")
+        self.assertEqual(guards._strip_trailing_unit("BC double wall", "mm"), "BC double wall")
+
     def test_recommendation_cannot_overwrite_buyer_fact(self):
         rfq = rfq_with()
         guards.apply_field_updates(rfq, [fu("quantity", "30000", "30,000 boxes", section="commercial", value_kind="number")], "I need 30,000 boxes", "msg:1", 1)
@@ -312,6 +328,15 @@ class QuestionGuardTest(unittest.TestCase):
         self.assertEqual(conflict_qs[0].suggested_options, ["30,000", "50,000"])
 
 
+class LabelJoinTest(unittest.TestCase):
+    def test_never_claims_more_than_it_shows(self):
+        self.assertEqual(guards.join_labels([]), "")
+        self.assertEqual(guards.join_labels(["A"]), "A")
+        self.assertEqual(guards.join_labels(["A", "B"]), "A and B")
+        self.assertEqual(guards.join_labels(["A", "B", "C", "D"]), "A, B, C and D")
+        self.assertEqual(guards.join_labels(["A", "B", "C", "D", "E", "F"]), "A, B, C, D and 2 more")
+
+
 class CompletenessTest(unittest.TestCase):
     def test_scores_and_readiness(self):
         rfq = rfq_with()
@@ -335,6 +360,10 @@ class CompletenessTest(unittest.TestCase):
         self.assertEqual(c.score, int(round(100 * 6 / 7)))
         self.assertIn("Certifications", c.recommended_fields)
         self.assertTrue(c.explanation.startswith("Ready to send"))
+        # the sentence must not promise more names than it prints
+        import re as _re
+        m = _re.search(r"Answering (\d+) more", c.explanation)
+        self.assertIsNone(m, "counts are not asserted without the matching names: %s" % c.explanation)
 
     def test_unknown_does_not_block_but_conflict_and_line_gaps_do(self):
         rfq = rfq_with()

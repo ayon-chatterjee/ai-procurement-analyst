@@ -113,5 +113,50 @@ class FieldRegistryTest(unittest.TestCase):
         self.assertTrue(all(v.status == FieldStatus.MISSING and v.source == Source.MISSING for v in fs.values()))
 
 
+class TrustLabelTest(unittest.TestCase):
+    """The UI labels are the user-facing half of the trust model: an AI recommendation
+    must never be presented as something the buyer stated."""
+
+    def _fv(self, status, source, value="B flute", **kw):
+        return FieldValue(key="flute", label="Flute", section=Section.TECHNICAL, value=value, status=status, source=source, **kw)
+
+    def test_provenance_badge_never_conflates_ai_with_buyer(self):
+        from ui.components import field_value_text, provenance_badge
+        cases = {
+            (FieldStatus.PROVIDED, Source.BUYER_EXPLICIT): "Buyer stated",
+            (FieldStatus.PROVIDED, Source.MANUAL_EDIT): "Buyer edited",
+            (FieldStatus.RECOMMENDED, Source.AI_RECOMMENDED): "AI recommendation",
+            (FieldStatus.UNKNOWN, Source.BUYER_EXPLICIT): "Buyer unsure",
+            (FieldStatus.NOT_APPLICABLE, Source.MISSING): "Not applicable",
+            (FieldStatus.CONFLICT, Source.BUYER_EXPLICIT): "Conflict",
+            (FieldStatus.MISSING, Source.MISSING): "Missing",
+        }
+        for (status, source), expected in cases.items():
+            badge = provenance_badge(self._fv(status, source))
+            self.assertIn(expected, badge, "%s/%s must read %r" % (status.value, source.value, expected))
+            if source == Source.AI_RECOMMENDED:
+                self.assertNotIn("Buyer", badge, "a recommendation must not be labelled as buyer input")
+
+    def test_recommended_value_is_shown_as_a_recommendation(self):
+        from ui.components import field_value_text
+        fv = self._fv(FieldStatus.RECOMMENDED, Source.AI_RECOMMENDED, note="Common for shipping cartons.")
+        text = field_value_text(fv)
+        self.assertTrue(text.startswith("Recommended:"), text)
+        self.assertIn("B flute", text)
+        # and a buyer fact is shown plainly, with no hedging prefix
+        self.assertEqual(field_value_text(self._fv(FieldStatus.PROVIDED, Source.BUYER_EXPLICIT)), "B flute")
+
+    def test_unknown_and_missing_read_differently(self):
+        from ui.components import field_value_text
+        self.assertEqual(field_value_text(self._fv(FieldStatus.MISSING, Source.MISSING, value=None)), "Missing")
+        self.assertIn("doesn't know", field_value_text(self._fv(FieldStatus.UNKNOWN, Source.BUYER_EXPLICIT, value=None)))
+
+    def test_conflict_shows_both_values(self):
+        from ui.components import field_value_text
+        fv = self._fv(FieldStatus.CONFLICT, Source.BUYER_EXPLICIT, value=None)
+        fv.conflict_values = [{"value": 30000.0, "unit": "pcs"}, {"value": 50000.0, "unit": "pcs"}]
+        self.assertEqual(field_value_text(fv), "30,000 pcs vs 50,000 pcs")
+
+
 if __name__ == "__main__":
     unittest.main()
