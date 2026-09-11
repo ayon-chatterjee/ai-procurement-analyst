@@ -250,3 +250,96 @@ class AnswerCollectionTest(unittest.TestCase):
 
     def test_nothing_selected_yields_nothing(self):
         self.assertEqual(self._collect({}), {"answers": {}, "skipped": []})
+
+
+class LineItemGridTest(unittest.TestCase):
+    """The review grid reads st.data_editor's widget state; its return value dropped both
+    edits and added rows silently, so the folding is covered directly."""
+
+    BASE = [
+        {"id": "LINE-001", "product": "Carton", "specifications": "Dimensions: 10x10x5 in", "quantity": 100.0,
+         "unit": "pcs", "target_price": None, "required_date": "", "source": "Buyer stated"},
+        {"id": "LINE-002", "product": "Carton", "specifications": "Dimensions: 12x10x6 in", "quantity": 100.0,
+         "unit": "pcs", "target_price": None, "required_date": "", "source": "Buyer stated"},
+    ]
+
+    def _fold(self, deltas):
+        from ui.components import BLANK_LINE_ROW, apply_editor_deltas
+        return apply_editor_deltas(self.BASE, deltas, BLANK_LINE_ROW)
+
+    def test_no_changes_returns_the_rows_unchanged(self):
+        self.assertEqual(len(self._fold(None)), 2)
+        self.assertEqual(len(self._fold({})), 2)
+        self.assertEqual(self._fold({})[0]["product"], "Carton")
+
+    def test_a_cell_edit_is_applied_to_the_right_row(self):
+        out = self._fold({"edited_rows": {1: {"product": "Heavy Duty", "quantity": 250}}})
+        self.assertEqual(out[0]["product"], "Carton")
+        self.assertEqual(out[1]["product"], "Heavy Duty")
+        self.assertEqual(out[1]["quantity"], 250)
+        self.assertEqual(out[1]["id"], "LINE-002", "the edited row keeps its line id")
+
+    def test_string_row_indices_are_handled(self):
+        out = self._fold({"edited_rows": {"0": {"unit": "cartons"}}})
+        self.assertEqual(out[0]["unit"], "cartons")
+
+    def test_a_typed_bottom_row_becomes_a_new_line(self):
+        out = self._fold({"added_rows": [{"product": "Oversize Carton", "quantity": 50}]})
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[2]["product"], "Oversize Carton")
+        self.assertEqual(out[2]["quantity"], 50)
+        self.assertEqual(out[2]["id"], "", "a new row carries no id so the service allocates one")
+        self.assertEqual(out[2]["unit"], "pcs", "unfilled columns fall back to the blank template")
+
+    def test_deleted_rows_are_dropped(self):
+        out = self._fold({"deleted_rows": [0]})
+        self.assertEqual([r["id"] for r in out], ["LINE-002"])
+
+    def test_edit_add_and_delete_together(self):
+        out = self._fold({"edited_rows": {0: {"quantity": 500}},
+                          "added_rows": [{"product": "New Line"}],
+                          "deleted_rows": [1]})
+        self.assertEqual([r["id"] for r in out], ["LINE-001", ""])
+        self.assertEqual(out[0]["quantity"], 500)
+        self.assertEqual(out[1]["product"], "New Line")
+
+    def test_nan_from_pandas_becomes_none(self):
+        nan = float("nan")
+        out = self._fold({"edited_rows": {0: {"target_price": nan}}, "added_rows": [{"product": "X", "quantity": nan}]})
+        self.assertIsNone(out[0]["target_price"])
+        self.assertIsNone(out[2]["quantity"], "a blank numeric cell must not reach the service as NaN")
+
+    def test_an_entirely_blank_added_row_is_ignorable(self):
+        """Streamlit records a row as soon as it is touched; a blank one must be droppable."""
+        out = self._fold({"added_rows": [{}]})
+        self.assertEqual(out[2]["product"], "")
+        keep = [r for r in out if str(r.get("product") or "").strip()]
+        self.assertEqual(len(keep), 2)
+
+
+class PendingChangesTest(unittest.TestCase):
+    """The grid must never lose an edit silently, so unsaved state is surfaced to the buyer."""
+
+    def _pending(self, deltas):
+        from ui.components import pending_line_changes
+        return pending_line_changes(deltas)
+
+    def test_nothing_pending(self):
+        for d in (None, {}, {"edited_rows": {}, "added_rows": [], "deleted_rows": []}):
+            self.assertEqual(self._pending(d), {})
+
+    def test_a_row_merely_clicked_into_is_not_a_change(self):
+        """Streamlit records an empty dict as soon as the bottom row is focused."""
+        self.assertEqual(self._pending({"added_rows": [{}]}), {})
+
+    def test_counts_each_kind_of_change(self):
+        p = self._pending({"edited_rows": {0: {"product": "x"}, 2: {"quantity": 5}},
+                           "added_rows": [{"product": "New"}, {}],
+                           "deleted_rows": [1]})
+        self.assertEqual(p, {"edited": 2, "added": 1, "deleted": 1})
+
+    def test_description_is_readable(self):
+        from ui.components import describe_changes
+        self.assertEqual(describe_changes({"edited": 1}), "1 line (1 edited)")
+        self.assertEqual(describe_changes({"edited": 2, "added": 1}), "3 lines (2 edited, 1 new)")
+        self.assertEqual(describe_changes({}), "")

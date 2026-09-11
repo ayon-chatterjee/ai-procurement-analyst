@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from typing import List
 
+import pandas as pd
 import streamlit as st
 
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.schema import RFQ, SECTION_LABELS, FieldStatus, FieldValue, Importance, RFQStatus, Section
 from . import state
 from .components import (
-    SECTION_ORDER, field_value_text, line_items_frame, provenance_badge, render_readiness_panel, render_resume_hint, status_badge,
+    BLANK_LINE_ROW, LINE_COLUMNS, SECTION_ORDER, apply_editor_deltas, describe_changes, field_value_text,
+    line_item_rows, pending_line_changes, provenance_badge, render_readiness_panel, render_resume_hint, status_badge,
 )
 from .theme import badge, esc
 
@@ -84,57 +86,64 @@ def _overview(rfq: RFQ) -> None:
 
 
 def _line_items(svc, rfq: RFQ) -> None:
-    """Explicit per-line inputs inside one form.
+    """An editable grid: type in a cell to change it, type in the bottom row to add a line.
 
-    An earlier version used st.data_editor; its delta-based widget state silently dropped
-    edits and showed phantom "None" rows, so every line is a plain widget now and one
-    submit writes them all.
+    The grid's changes are read from its widget state rather than its return value; the
+    return value silently dropped both edits and added rows in an earlier version.
     """
     locked = rfq.status == RFQStatus.SUPPLIER_READY
-    # Re-key on updated_at so the inputs reload from the saved data after each write.
-    rev = "%s_%s" % (rfq.id, rfq.updated_at)
-    extra_key = "li_extra_%s" % rfq.id
-    extra = int(st.session_state.get(extra_key, 0))
+    rows = line_item_rows(rfq)
+    # Re-key on updated_at so a save starts a clean grid instead of replaying stale deltas.
+    editor_key = "li_grid_%s_%s" % (rfq.id, rfq.updated_at)
 
     with st.container(border=True):
         st.markdown('<div class="rfq-kicker">Line items</div>', unsafe_allow_html=True)
-        if not rfq.line_items and not extra:
-            st.markdown('<div class="rfq-field-value dim">No line items yet. List sizes or variants in the Copilot, or add one below.</div>',
-                        unsafe_allow_html=True)
+        if not rfq.line_items:
+            st.markdown('<div class="rfq-field-value dim">No line items yet. List sizes or variants in the Copilot, '
+                        'or type in the empty row below to add one.</div>', unsafe_allow_html=True)
+
+        st.data_editor(
+            pd.DataFrame(rows, columns=LINE_COLUMNS),
+            key=editor_key,
+            num_rows="fixed" if locked else "dynamic",
+            disabled=True if locked else ["id", "source"],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.TextColumn("Line", width="small", help="Assigned automatically when you save"),
+                "product": st.column_config.TextColumn("Product", required=True),
+                "specifications": st.column_config.TextColumn("Specifications", help="Name: value; Name: value", width="large"),
+                "quantity": st.column_config.NumberColumn("Quantity", min_value=0, step=1, format="%d"),
+                "unit": st.column_config.TextColumn("Unit", width="small"),
+                "target_price": st.column_config.NumberColumn("Target price", min_value=0.0, format="%.2f"),
+                "required_date": st.column_config.TextColumn("Required date"),
+                "source": st.column_config.TextColumn("Source", width="small"),
+            },
+        )
         if locked:
-            for li in rfq.line_items:
-                st.markdown('<div class="rfq-line"><b>%s</b> · %s<br><span class="rfq-sub">%s</span><br>'
-                            '<span class="rfq-sub">%s %s%s</span></div>' % (
-                                esc(li.id), esc(li.product), esc(li.spec_summary() or li.description or "no specification"),
-                                esc("{:,}".format(int(li.quantity))) if li.quantity else "—", esc(li.unit),
-                                (" · due " + esc(li.required_date)) if li.required_date else ""), unsafe_allow_html=True)
             return
 
-        with st.form("li_form_%s" % rev, border=False):
-            rows = []
-            for li in rfq.line_items:
-                rows.append(_line_inputs(rev, li.id, li.id, li.product, li.spec_summary() or li.description,
-                                         li.quantity, li.unit, li.target_price, li.required_date, removable=True))
-            for i in range(extra):
-                rows.append(_line_inputs(rev, "new%d" % i, "New", "", "", None, "pcs", None, "", removable=False))
-            saved = st.form_submit_button("Save line items", type="primary")
-        c1, c2 = st.columns([1.5, 5])
-        with c1:
-            if st.button("Add a line", key="li_add_%s" % rfq.id, use_container_width=True):
-                st.session_state[extra_key] = extra + 1
-                st.rerun()
-        with c2:
-            st.caption("Specifications use `Name: value; Name: value`. Tick Remove to delete a line.")
-
-        if saved:
-            payload = [r for r in rows if not r["remove"] and str(r["product"]).strip()]
-            dropped = [r["id"] for r in rows if not r["remove"] and not str(r["product"]).strip() and r["id"] != "New"]
+        # Live count of what the grid is actually holding. A cell still being typed has not
+        # reached the widget state yet, so this is the buyer's signal that an edit registered -
+        # previously a half-finished cell was lost on save with no indication at all.
+        deltas = st.session_state.get(editor_key) or {}
+        pending = pending_line_changes(deltas)
+        st.caption("Start typing in the **Product** column of the empty bottom row to add a line. "
+                   "Select a row and press delete to remove it. Press Enter or Tab to commit a cell before saving.")
+        if pending:
+            st.markdown('<span class="rfq-pending">%s unsaved</span>' % esc(describe_changes(pending)), unsafe_allow_html=True)
+        else:
+            st.caption("No unsaved changes.")
+        if st.button("Save line items", key="li_save_%s" % rfq.id, type="primary", disabled=not pending):
+            edited = apply_editor_deltas(rows, deltas, BLANK_LINE_ROW)
+            payload = [r for r in edited if str(r.get("product") or "").strip()]
+            blanks = len(edited) - len(payload)
             try:
                 svc.replace_line_items(rfq.id, payload)
-                st.session_state[extra_key] = 0
                 msg = "Line items saved. Your edits are recorded as buyer requirements."
-                if dropped:
-                    msg += " %s had no product name and was removed." % ", ".join(dropped)
+                if blanks:
+                    msg += " %d row%s without a product name %s ignored." % (
+                        blanks, "" if blanks == 1 else "s", "was" if blanks == 1 else "were")
                 state.flash(msg)
                 st.rerun()
             except RFQStateError as e:
@@ -144,31 +153,6 @@ def _line_items(svc, rfq: RFQ) -> None:
         if needs:
             st.caption("%s could not be matched to your exact words. Confirm or edit them; unconfirmed lines block readiness."
                        % ", ".join(needs))
-
-
-def _line_inputs(rev, slot, label, product, specs, quantity, unit, price, date, removable):
-    """One editable line. Returns the values as a row dict for replace_line_items()."""
-    head, c1, c2 = st.columns([0.9, 4.2, 4.9])
-    with head:
-        st.markdown('<div class="rfq-line-id">%s</div>' % esc(label), unsafe_allow_html=True)
-    with c1:
-        p = st.text_input("Product", value=product, key="li_p_%s_%s" % (rev, slot), placeholder="Product name")
-    with c2:
-        sp = st.text_input("Specifications", value=specs, key="li_s_%s_%s" % (rev, slot),
-                           placeholder="Dimensions: 10 x 10 x 5 in; Flute: B")
-    q1, q2, q3, q4 = st.columns([2, 1.4, 2, 1.6])
-    with q1:
-        qty = st.number_input("Quantity", min_value=0, step=1, value=int(quantity) if quantity else 0,
-                              key="li_q_%s_%s" % (rev, slot))
-    with q2:
-        un = st.text_input("Unit", value=unit or "pcs", key="li_u_%s_%s" % (rev, slot))
-    with q3:
-        dt = st.text_input("Required date", value=date or "", key="li_d_%s_%s" % (rev, slot), placeholder="optional")
-    with q4:
-        rm = st.checkbox("Remove", key="li_x_%s_%s" % (rev, slot)) if removable else False
-    st.markdown('<div class="rfq-line-sep"></div>', unsafe_allow_html=True)
-    return {"id": "" if label == "New" else label, "product": p, "specifications": sp,
-            "quantity": qty or None, "unit": un, "target_price": price, "required_date": dt, "remove": rm}
 
 
 def _visible_fields(rfq: RFQ, sec: Section) -> List[FieldValue]:

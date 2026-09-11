@@ -1,7 +1,7 @@
 """Reusable UI pieces. Render state only; every action goes through RFQService."""
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -199,20 +199,26 @@ def collect_answers(questions: List[Question], turn: int) -> Dict[str, object]:
 # --------------------------------------------------------------------------- #
 # Line items table
 # --------------------------------------------------------------------------- #
+LINE_COLUMNS = ["id", "product", "specifications", "quantity", "unit", "target_price", "required_date", "source"]
+SOURCE_LABELS = {"buyer_explicit": "Buyer stated", "manual_edit": "Buyer edited", "ai_recommended": "Needs confirmation"}
+
+
+def line_item_rows(rfq: RFQ) -> List[Dict[str, Any]]:
+    """The grid's rows, in display order. Position is what the editor's deltas index into."""
+    return [{
+        "id": li.id,
+        "product": li.product,
+        "specifications": li.spec_summary() or li.description,
+        "quantity": li.quantity,
+        "unit": li.unit,
+        "target_price": li.target_price,
+        "required_date": li.required_date or "",
+        "source": SOURCE_LABELS.get(li.source.value, li.source.value),
+    } for li in rfq.line_items]
+
+
 def line_items_frame(rfq: RFQ) -> pd.DataFrame:
-    rows = []
-    for li in rfq.line_items:
-        rows.append({
-            "id": li.id,
-            "product": li.product,
-            "specifications": li.spec_summary() or li.description,
-            "quantity": li.quantity,
-            "unit": li.unit,
-            "target_price": li.target_price,
-            "required_date": li.required_date or "",
-            "source": {"buyer_explicit": "Buyer stated", "manual_edit": "Buyer edited", "ai_recommended": "Needs confirmation"}.get(li.source.value, li.source.value),
-        })
-    return pd.DataFrame(rows, columns=["id", "product", "specifications", "quantity", "unit", "target_price", "required_date", "source"])
+    return pd.DataFrame(line_item_rows(rfq), columns=LINE_COLUMNS)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,3 +243,91 @@ def render_resume_hint(svc, key_prefix: str, on_open) -> bool:
     return True
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Data-editor deltas
+# --------------------------------------------------------------------------- #
+def _clean(v):
+    """NaN/NaT from pandas become None; everything else passes through."""
+    if v is None:
+        return None
+    if isinstance(v, float) and v != v:      # NaN is the only value unequal to itself
+        return None
+    return v
+
+
+def apply_editor_deltas(base_rows: List[Dict[str, Any]], deltas: Optional[Dict[str, Any]],
+                        blank: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Fold an st.data_editor widget state onto the rows it was rendered from.
+
+    Streamlit keeps grid changes in session_state as
+    ``{"edited_rows": {row_index: {column: value}}, "added_rows": [...], "deleted_rows": [...]}``
+    where the indices are positions in the dataframe that was passed in. Reading that state
+    is what makes edits and new rows land; the widget's return value proved unreliable here
+    and dropped both silently.
+    """
+    deltas = deltas or {}
+    edited = deltas.get("edited_rows") or {}
+    added = deltas.get("added_rows") or []
+    deleted = set()
+    for i in deltas.get("deleted_rows") or []:
+        try:
+            deleted.add(int(i))
+        except (TypeError, ValueError):
+            continue
+
+    out: List[Dict[str, Any]] = []
+    for i, row in enumerate(base_rows):
+        if i in deleted:
+            continue
+        r = {k: _clean(v) for k, v in row.items()}
+        # index keys arrive as int or str depending on how the state was serialised
+        patch = edited.get(i)
+        if patch is None:
+            patch = edited.get(str(i)) or {}
+        for k, v in patch.items():
+            r[k] = _clean(v)
+        out.append(r)
+
+    template = blank or {}
+    for a in added:
+        r = dict(template)
+        for k, v in (a or {}).items():
+            v = _clean(v)
+            if v is not None:
+                r[k] = v
+        r["id"] = ""          # a new row always gets a freshly allocated line id
+        out.append(r)
+    return out
+
+
+BLANK_LINE_ROW: Dict[str, Any] = {
+    "id": "", "product": "", "specifications": "", "quantity": None,
+    "unit": "pcs", "target_price": None, "required_date": "",
+}
+
+
+def pending_line_changes(deltas: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """What the grid is holding that has not been saved yet.
+
+    A row the buyer merely clicked into shows up in ``added_rows`` as an empty dict, so a
+    blank new row is not counted as a change.
+    """
+    deltas = deltas or {}
+    added = [a for a in (deltas.get("added_rows") or []) if str((a or {}).get("product") or "").strip()]
+    counts = {
+        "edited": len(deltas.get("edited_rows") or {}),
+        "added": len(added),
+        "deleted": len(deltas.get("deleted_rows") or []),
+    }
+    return {k: v for k, v in counts.items() if v}
+
+
+def describe_changes(pending: Dict[str, int]) -> str:
+    if not pending:
+        return ""
+    order = [("edited", "edited"), ("added", "new"), ("deleted", "removed")]
+    parts = ["%d %s" % (pending[k], word) for k, word in order if pending.get(k)]
+    total = sum(pending.values())
+    return "%s (%s)" % ("1 line" if total == 1 else "%d lines" % total, ", ".join(parts))
