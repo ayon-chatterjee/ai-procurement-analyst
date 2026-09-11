@@ -1,0 +1,199 @@
+{
+ "classification": {
+  "product": "Corrugated Carton Boxes",
+  "category": "Packaging - Corrugated Boxes",
+  "product_type": "custom manufactured packaging",
+  "confidence": 0.9,
+  "note": "Standard corrugated box RFQ with multiple sizes, destination India."
+ },
+ "title": "RFQ: Corrugated Carton Boxes - 50,000 pcs (2 sizes) to India",
+ "assistant_message": "Got it \u2014 corrugated boxes, 50,000 pcs total across two sizes, shipping to India. Logged the quantity correction and flagged flute type as unknown. A few more details will help suppliers quote accurately.",
+ "field_updates": [
+  {
+   "key": "quantity",
+   "section": "commercial",
+   "label": "Total Quantity",
+   "value": "50000",
+   "value_kind": "number",
+   "unit": "pieces",
+   "source": "buyer_explicit",
+   "status": "provided",
+   "revision": "correction",
+   "evidence": "actually make that 50,000",
+   "importance": "required",
+   "note": "Corrected from initial 30,000."
+  },
+  {
+   "key": "destination",
+   "section": "logistics",
+   "label": "Destination",
+   "value": "India",
+   "value_kind": "text",
+   "unit": null,
+   "source": "buyer_explicit",
+   "status": "provided",
+   "revision": "none",
+   "evidence": "Ship to India",
+   "importance": "required",
+   "note": null
+  },
+  {
+   "key": "customization_type",
+   "section": "technical",
+   "label": "Flute Type",
+   "value": "unknown",
+   "value_kind": "text",
+   "unit": null,
+   "source": "buyer_explicit",
+   "status": "unknown",
+   "revision": "none",
+   "evidence": "I don't know the flute type",
+   "importance": "required",
+   "note": "Buyer unsure; needs recommendation or spec."
+  }
+ ],
+ "applicability_updates": [],
+ "line_items": {
+  "mode": "replace",
+  "items": [
+   {
+    "line_id": "1",
+    "product": "Corrugated Carton Box",
+    "description": "Corrugated carton box, size 10x10x5 in",
+    "specifications": [
+     {
+      "name": "Dimensions",
+      "value": "10x10x5",
+      "unit": "in"
+     }
+    ],
+    "quantity": null,
+    "unit": "pieces",
+    "target_price": null,
+    "required_date": null,
+    "evidence": "Sizes: 10x10x5 in and 12x10x6 in"
+   },
+   {
+    "line_id": "2",
+    "product": "Corrugated Carton Box",
+    "description": "Corrugated carton box, size 12x10x6 in",
+    "specifications": [
+     {
+      "name": "Dimensions",
+      "value": "12x10x6",
+      "unit": "in"
+     }
+    ],
+    "quantity": null,
+    "unit": "pieces",
+    "target_price": null,
+    "required_date": null,
+    "evidence": "Sizes: 10x10x5 in and 12x10x6 in"
+   }
+  ]
+ },
+ "answered_questions": [],
+ "new_questions": [
+  {
+   "section": "commercial",
+   "field_key": "quantity",
+   "question": "How should the 50,000 pieces be split between the 10x10x5in and 12x10x6in sizes?",
+   "reason": "Needed to quote each line item accurately",
+   "importance": "required",
+   "answer_type": "text",
+   "suggested_options": []
+  },
+  {
+   "section": "technical",
+   "field_key": "customization_type",
+   "question": "Do you have a preferred flute type (e.g., B, C, E) or should we recommend based on strength needs?",
+   "reason": "Flute type materially affects strength and price",
+   "importance": "required",
+   "answer_type": "choice",
+   "suggested_options": [
+    "B-flute",
+    "C-flute",
+    "E-flute",
+    "Let supplier recommend"
+   ]
+  },
+  {
+   "section": "technical",
+   "field_key": "technical_summary",
+   "question": "What board grade/GSM or burst strength (ECT) do you require?",
+   "reason": "Determines material cost and durability",
+   "importance": "required",
+   "answer_type": "text",
+   "suggested_options": []
+  },
+  {
+   "section": "technical",
+   "field_key": "technical_summary",
+   "question": "Do the boxes need printing/branding (colors, sides printed) or plain kraft?",
+   "reason": "Printing significantly affects unit cost",
+   "importance": "recommended",
+   "answer_type": "text",
+   "suggested_options": []
+  },
+  {
+   "section": "logistics",
+   "field_key": "required_delivery_date",
+   "question": "What is your required delivery date in India?",
+   "reason": "Affects supplier lead time feasibility",
+   "importance": "recommended",
+   "answer_type": "date",
+   "suggested_options": []
+  },
+  {
+   "section": "commercial",
+   "field_key": "currency",
+   "question": "What currency and target landed cost per unit are you targeting?",
+   "reason": "Needed for price comparability",
+   "importance": "recommended",
+   "answer_type": "text",
+   "suggested_options": []
+  },
+  {
+   "section": "quality",
+   "field_key": "certifications",
+   "question": "Are any certifications required (e.g., ISPM-15, FSC)?",
+   "reason": "Impacts supplier eligibility and cost",
+   "importance": "recommended",
+   "answer_type": "text",
+   "suggested_options": []
+  },
+  {
+   "section": "logistics",
+   "field_key": "packaging_requirements",
+   "question": "Any bundling/palletizing requirements for shipment?",
+   "reason": "Affects logistics cost and packing spec",
+   "importance": "recommended",
+   "answer_type": "text",
+   "suggested_options": []
+  }
+ ],
+ "completeness": {
+  "score": 25,
+  "ready_to_send": false,
+  "missing_required_fields": [
+   "quantity split per line item",
+   "technical_summary (flute/board spec)"
+  ],
+  "recommended_fields": [
+   "currency",
+   "target_landed_cost",
+   "price_basis",
+   "sourcing_country",
+   "shipping_method",
+   "required_delivery_date",
+   "packaging_requirements",
+   "certifications"
+  ],
+  "open_ambiguities": [
+   "Flute type unknown",
+   "Quantity split per size unknown",
+   "Printing/branding requirement unclear"
+  ],
+  "explanation": "Core quantity and destination captured but per-size quantities and key technical specs (flute, board grade) are missing, blocking accurate supplier quoting."
+ }
+}

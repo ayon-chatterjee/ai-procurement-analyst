@@ -1,0 +1,14 @@
+{
+ "type": "result",
+ "subtype": "error_max_turns",
+ "is_error": true,
+ "duration_ms": 60000,
+ "num_turns": 1,
+ "errors": [
+  "Reached maximum number of turns (1)"
+ ],
+ "result": null,
+ "session_id": "y",
+ "usage": {},
+ "modelUsage": {}
+}

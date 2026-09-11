@@ -1,0 +1,4 @@
+# All of these are already present in the system Python 3.9 environment on the dev Mac.
+streamlit>=1.49
+pandas>=2.3
+jsonschema>=4.25

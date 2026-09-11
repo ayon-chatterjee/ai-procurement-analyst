@@ -1,0 +1,13 @@
+{
+ "type": "result",
+ "subtype": "success",
+ "is_error": true,
+ "duration_ms": 37,
+ "num_turns": 1,
+ "result": "Not logged in \u00b7 Please run /login",
+ "session_id": "x",
+ "total_cost_usd": 0,
+ "usage": {},
+ "modelUsage": {},
+ "terminal_reason": "api_error"
+}
