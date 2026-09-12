@@ -30,6 +30,9 @@ AREAS = [
     ("tests/test_supplier_extraction.py", "Document reading & supplier guards (Phase 2)"),
     ("tests/test_supplier_normalization.py", "Price normalisation & line matching (Phase 2)"),
     ("tests/test_supplier_service.py", "Supplier service, comparison & FX (Phase 2)"),
+    ("tests/test_analyst_calculations.py", "Analyst calculations (Phase 3)"),
+    ("tests/test_analyst_guards.py", "Analyst query & explanation guards (Phase 3)"),
+    ("tests/test_analyst_service.py", "Analyst service & conversation (Phase 3)"),
 ]
 
 

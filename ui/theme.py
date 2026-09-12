@@ -72,6 +72,18 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .pg-missing { color: var(--muted); font-style: italic; }
 .pg-issue-mark { color: #EA580C; font-weight: 700; }
 .pg-issue-subject { color: var(--muted); font-weight: 500; }
+/* Procurement analyst */
+.an-q { font-size: 1.02rem; font-weight: 650; color: var(--ink); margin: .2rem 0 .1rem 0; }
+.an-reading { font-size: .8rem; color: var(--muted); margin-bottom: .7rem; }
+.an-answer { font-size: 1rem; line-height: 1.65; color: var(--ink); margin: .2rem 0 .7rem 0; }
+.an-hyp { background: #FFF7ED; border-left: 3px solid #F59E0B; padding: .5rem .75rem;
+  border-radius: 6px; font-size: .86rem; color: #92400E; margin-bottom: .7rem; }
+.an-refusal { background: #F8FAFC; border-left: 3px solid var(--muted); padding: .6rem .8rem;
+  border-radius: 6px; font-size: .95rem; color: var(--ink); }
+.an-note { font-size: .84rem; color: var(--muted); margin: .1rem 0; }
+.an-kind { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 700; margin: .9rem 0 .3rem 0; }
+.an-empty { color: var(--muted); font-size: .92rem; }
 .rfq-muted, .rfq-muted * { color: #94A3B8 !important; }
 .rfq-muted div[data-testid="stExpander"] details { border-color: var(--line); background: transparent; }
 </style>

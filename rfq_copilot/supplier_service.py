@@ -116,6 +116,55 @@ class ComparisonMatrix:
         return len(self.currencies()) <= 1
 
 
+
+def assemble_matrix(rfq: RFQ, suppliers: List[Supplier], bundles: List[ResponseBundle],
+                    rates: Optional[RateTable] = None,
+                    display_currency: Optional[str] = None) -> ComparisonMatrix:
+    """Shape loaded records into the comparison dataset. No I/O: the caller does the
+    reading and the rate fetch, so the same assembly can be exercised without a database
+    or a network."""
+    matrix = ComparisonMatrix(rfq=rfq, display_currency=(display_currency or "").strip().upper() or None)
+    by_supplier = {b.response.supplier_id: b for b in bundles}
+    matrix.bundles = by_supplier
+
+    all_suppliers = {s.id: s for s in suppliers}
+    matrix.suppliers = [all_suppliers[i] for i in by_supplier.keys() if i in all_suppliers]
+    # suppliers who never replied still belong in the comparison
+    for s in all_suppliers.values():
+        if s.id not in by_supplier and s.status == SupplierStatus.NO_RESPONSE:
+            matrix.suppliers.append(s)
+
+    # Prices, discounts and MOQ flags are *derived*. Recompute them from the stored
+    # facts on every read so a change to the rules cannot leave a stale figure on
+    # screen, and so a quote never silently keeps a number the rules would now refuse.
+    lines_by_id = {li.id: li for li in rfq.line_items}
+    for bundle in bundles:
+        for q in bundle.quotes:
+            if q.value_source == ValueSource.BUYER_CORRECTED:
+                continue                      # a human decision is not re-derived
+            refresh_derived_values(q, rfq, lines_by_id.get(q.line_item_id or ""))
+
+    for line in rfq.line_items:
+        for supplier in matrix.suppliers:
+            bundle = by_supplier.get(supplier.id)
+            if bundle is None:
+                matrix.cells[(line.id, supplier.id)] = ComparisonCell(
+                    line.id, supplier.id, CellState.NO_RESPONSE)
+                continue
+            quote = next((q for q in bundle.quotes if q.line_item_id == line.id), None)
+            matrix.cells[(line.id, supplier.id)] = ComparisonCell(
+                line.id, supplier.id, _cell_state(quote), quote)
+
+    if matrix.display_currency:
+        matrix.rates = rates
+        for cell in matrix.cells.values():
+            q = cell.quote
+            if q is None or q.normalized_unit_price is None:
+                continue
+            cell.converted = convert_amount(rates, q.normalized_unit_price,
+                                            q.currency, matrix.display_currency)
+    return matrix
+
 # --------------------------------------------------------------------------- #
 class SupplierService:
     def __init__(self, repo: RFQRepository, ai: AIService, settings: Optional[Settings] = None,
@@ -309,50 +358,13 @@ class SupplierService:
         rfq = self.repo.get_rfq(rfq_id)
         if rfq is None:
             raise RFQStateError("RFQ %s not found" % rfq_id)
-        matrix = ComparisonMatrix(rfq=rfq, display_currency=(display_currency or "").strip().upper() or None)
+        ccy = (display_currency or "").strip().upper() or None
 
         bundles = self.store.list_bundles(rfq_id, active_only=True)
-        by_supplier = {b.response.supplier_id: b for b in bundles}
-        matrix.bundles = by_supplier
-
-        supplier_ids = list(by_supplier.keys())
         all_suppliers = {s.id: s for s in self.store.list_suppliers()}
-        matrix.suppliers = [all_suppliers[i] for i in supplier_ids if i in all_suppliers]
-        # suppliers who never replied still belong in the comparison
-        for s in all_suppliers.values():
-            if s.id not in by_supplier and s.status == SupplierStatus.NO_RESPONSE:
-                matrix.suppliers.append(s)
+        rates = self.fx.rates(ccy) if ccy else None
 
-        # Prices, discounts and MOQ flags are *derived*. Recompute them from the stored
-        # facts on every read so a change to the rules cannot leave a stale figure on
-        # screen, and so a quote never silently keeps a number the rules would now refuse.
-        lines_by_id = {li.id: li for li in rfq.line_items}
-        for bundle in bundles:
-            for q in bundle.quotes:
-                if q.value_source == ValueSource.BUYER_CORRECTED:
-                    continue                      # a human decision is not re-derived
-                refresh_derived_values(q, rfq, lines_by_id.get(q.line_item_id or ""))
-
-        for line in rfq.line_items:
-            for supplier in matrix.suppliers:
-                bundle = by_supplier.get(supplier.id)
-                if bundle is None:
-                    matrix.cells[(line.id, supplier.id)] = ComparisonCell(
-                        line.id, supplier.id, CellState.NO_RESPONSE)
-                    continue
-                quote = next((q for q in bundle.quotes if q.line_item_id == line.id), None)
-                matrix.cells[(line.id, supplier.id)] = ComparisonCell(
-                    line.id, supplier.id, _cell_state(quote), quote)
-
-        if matrix.display_currency:
-            matrix.rates = self.fx.rates(matrix.display_currency)
-            for cell in matrix.cells.values():
-                q = cell.quote
-                if q is None or q.normalized_unit_price is None:
-                    continue
-                cell.converted = convert_amount(matrix.rates, q.normalized_unit_price,
-                                                q.currency, matrix.display_currency)
-
+        matrix = assemble_matrix(rfq, list(all_suppliers.values()), bundles, rates, ccy)
         matrix.summary = self._summary(rfq, matrix, bundles, all_suppliers)
         return matrix
 
@@ -493,47 +505,54 @@ class SupplierService:
 
     def review_queue(self, rfq_id: str) -> List[Dict[str, Any]]:
         """Everything the system is not willing to assert on its own."""
-        items: List[Dict[str, Any]] = []
-        seen_conflicts: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for b in self.bundles_for(rfq_id, active_only=True):
-            name = b.supplier.name if b.supplier else b.response.supplier_id
-            for q in b.quotes:
-                if q.match_status == MatchStatus.PROBABLE_MATCH:
-                    items.append({"kind": "probable_match", "supplier": name, "response_id": b.response.id,
-                                  "quote_id": q.id, "label": q.supplier_line_label,
-                                  "detail": q.match_reason, "line_item_id": q.line_item_id,
-                                  "alternatives": q.match_candidates})
-                elif q.match_status in (MatchStatus.UNMATCHED, MatchStatus.CONFLICT) and q.has_price:
-                    items.append({"kind": "unmatched", "supplier": name, "response_id": b.response.id,
-                                  "quote_id": q.id, "label": q.supplier_line_label,
-                                  "detail": q.match_reason, "alternatives": q.match_candidates})
-                # a response-level contradiction (one lead time stated twice) touches every
-                # line it applies to; the buyer needs to see it once, not once per line
-                for c in q.conflicts:
-                    key = (b.response.id, (c.get("topic") or "").lower())
-                    if key in seen_conflicts:
-                        seen_conflicts[key]["affected_lines"] += 1
-                        continue
-                    entry = {"kind": "conflict", "supplier": name, "response_id": b.response.id,
-                             "quote_id": q.id, "label": c.get("topic") or "contradiction",
-                             "detail": c.get("description", "")[:240],
-                             "values": [v.get("value") for v in c.get("values", [])],
-                             "affected_lines": 1}
-                    seen_conflicts[key] = entry
-                    items.append(entry)
-                if q.normalization_status == NormalizationStatus.UNRESOLVED and q.has_price:
-                    items.append({"kind": "unresolved_price", "supplier": name, "response_id": b.response.id,
-                                  "quote_id": q.id, "label": q.supplier_line_label,
-                                  "detail": q.normalization_note})
-            for c in b.certifications:
-                if c.status == ClaimStatus.CLAIMED:
-                    items.append({"kind": "unverified_claim", "supplier": name, "response_id": b.response.id,
-                                  "label": c.name, "detail": c.note})
-            for sq in b.questions:
-                if not sq.resolved:
-                    items.append({"kind": "supplier_question", "supplier": name, "response_id": b.response.id,
-                                  "question_id": sq.id, "label": sq.question, "detail": sq.related_field_key})
-        return items
+        return review_items(self.bundles_for(rfq_id, active_only=True))
+
+
+# --------------------------------------------------------------------------- #
+def review_items(bundles: List[ResponseBundle]) -> List[Dict[str, Any]]:
+    """The review queue over already-loaded bundles, so callers that hold a comparison
+    dataset do not have to read the database a second time."""
+    items: List[Dict[str, Any]] = []
+    seen_conflicts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for b in bundles:
+        name = b.supplier.name if b.supplier else b.response.supplier_id
+        for q in b.quotes:
+            if q.match_status == MatchStatus.PROBABLE_MATCH:
+                items.append({"kind": "probable_match", "supplier": name, "response_id": b.response.id,
+                              "quote_id": q.id, "label": q.supplier_line_label,
+                              "detail": q.match_reason, "line_item_id": q.line_item_id,
+                              "alternatives": q.match_candidates})
+            elif q.match_status in (MatchStatus.UNMATCHED, MatchStatus.CONFLICT) and q.has_price:
+                items.append({"kind": "unmatched", "supplier": name, "response_id": b.response.id,
+                              "quote_id": q.id, "label": q.supplier_line_label,
+                              "detail": q.match_reason, "alternatives": q.match_candidates})
+            # a response-level contradiction (one lead time stated twice) touches every
+            # line it applies to; the buyer needs to see it once, not once per line
+            for c in q.conflicts:
+                key = (b.response.id, (c.get("topic") or "").lower())
+                if key in seen_conflicts:
+                    seen_conflicts[key]["affected_lines"] += 1
+                    continue
+                entry = {"kind": "conflict", "supplier": name, "response_id": b.response.id,
+                         "quote_id": q.id, "label": c.get("topic") or "contradiction",
+                         "detail": c.get("description", "")[:240],
+                         "values": [v.get("value") for v in c.get("values", [])],
+                         "affected_lines": 1}
+                seen_conflicts[key] = entry
+                items.append(entry)
+            if q.normalization_status == NormalizationStatus.UNRESOLVED and q.has_price:
+                items.append({"kind": "unresolved_price", "supplier": name, "response_id": b.response.id,
+                              "quote_id": q.id, "label": q.supplier_line_label,
+                              "detail": q.normalization_note})
+        for c in b.certifications:
+            if c.status == ClaimStatus.CLAIMED:
+                items.append({"kind": "unverified_claim", "supplier": name, "response_id": b.response.id,
+                              "label": c.name, "detail": c.note})
+        for sq in b.questions:
+            if not sq.resolved:
+                items.append({"kind": "supplier_question", "supplier": name, "response_id": b.response.id,
+                              "question_id": sq.id, "label": sq.question, "detail": sq.related_field_key})
+    return items
 
 
 # --------------------------------------------------------------------------- #

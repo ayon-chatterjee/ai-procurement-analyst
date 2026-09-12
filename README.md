@@ -1,16 +1,18 @@
 # AI Procurement Analyst
 
 A working prototype that takes a buyer from *"I need carton boxes"* to a supplier-ready
-RFQ, then reads messy supplier replies and turns them into one comparison you can trust.
+RFQ, reads messy supplier replies into one comparison you can trust, and then lets the
+buyer interrogate that comparison in plain English.
 
-Two phases are built:
+Three phases are built:
 
 | Phase | What it does |
 |---|---|
 | **1 · RFQ Copilot** | The buyer describes a need in their own words. The AI identifies the product and category, asks only the questions that materially affect supplier pricing, and produces a structured RFQ with line items, provenance and a readiness score. |
 | **2 · Supplier Response Intelligence** | Five suppliers reply in five different formats. The system reads each document, extracts what was actually written, matches supplier lines to RFQ lines, normalises prices where that is safe, and presents a side-by-side comparison with the evidence still attached. |
+| **3 · Procurement Analyst** | The buyer asks questions — *"who is cheapest for each line?"*, *"only among suppliers who cleared QA"*, *"why was Shenzhen excluded?"* — and gets answers calculated from those same quotes, with the method, the assumptions, what was left out, and the supplier's own words behind every figure. |
 
-Phase 3 (a natural-language analyst) and Phase 4 (awarding) are **not** built.
+Phase 4 (awarding) is **not** built.
 
 ---
 
@@ -81,6 +83,33 @@ Things worth looking at in the demo:
 - Shenzhen's first quote contradicts itself on lead time (15 days on page 1, 25 on page 3).
   Both are kept. Their revision supersedes it without deleting it.
 
+### Phase 3 — ask the analyst
+
+1. From the comparison, press **Ask the analyst**, or open **Procurement Analyst**.
+2. The six suggested questions answer instantly: they are pre-built queries and make no
+   model call. Typing a question of your own costs two calls and about a minute.
+3. Every answer carries **How this was calculated** (the steps, the assumptions, the
+   exchange rates and where they came from), **Left out of this answer** (every supplier
+   and line that was excluded, with the reason), and **Evidence** popovers showing the
+   supplier's own sentence and where in their document it appears.
+
+The sequence worth walking through on the 30-line RFQ:
+
+| Ask | What it shows |
+|---|---|
+| *Who is cheapest for each line?* | A price per line with a runner-up and a gap, and 104 cells left out — each one named and explained. |
+| *Now only among suppliers who cleared QA.* | The same calculation over one supplier, because only Istanbul holds a certificate we actually have. The assumption is printed under the answer. |
+| *Why didn't we choose Shenzhen for line 17?* | Their MOQ of 4,000 exceeds the line's 1,500, and their certifications are claimed rather than document-backed — with the sentence from their PDF and its page number. |
+| *What percentage of the RFQ has valid quotes?* | The percentage with its numerator, its denominator and the definition of "valid". |
+| *Who quoted the most lines?* | Coverage per supplier, with declines, silences and unresolved prices counted separately. |
+| *What should I review before deciding?* | Every open issue, blocking ones first. |
+| *Which suppliers quote FOB terms?* | An open-ended read of the stored data, quoting each supplier's own wording. |
+| *What is the best supplier in China?* | The analyst compares the suppliers who responded and says plainly that it has no data on suppliers outside this RFQ. |
+
+A what-if — *"what if we ignore minimum order quantities?"* — is labelled as one and
+changes only what is counted. `sqlite3 data/rfq_copilot.db .dump` is byte-identical before
+and after.
+
 ---
 
 ## Architecture
@@ -94,6 +123,10 @@ UI (Streamlit)
         ├─ supplier_guards        evidence, claims, conflicts, currency
         ├─ line_matcher           supplier line → RFQ line, with a status
         └─ quote_normalizer       price basis, discounts, MOQ, lead time
+  └─ AnalystService ─────────► Phase 3: questions about that comparison
+        ├─ analyst_prompts        question → structured query; result → one sentence
+        ├─ analyst_guards         resolve names, validate the query, check the sentence
+        └─ analyst_calculations   every figure, computed in Python
                     │
               AIService → ClaudeCLIProvider → claude -p --json-schema
                     │
@@ -118,6 +151,30 @@ decides what the application is willing to assert. That split is why:
 - two contradictory statements are both kept, with their own evidence;
 - no exchange rate is ever invented: if rates cannot be fetched, prices stay in the
   currency each supplier used rather than being converted on a guess.
+
+### The rule the whole of Phase 3 rests on
+
+> **The model is not the database.**
+
+Claude does two narrow jobs: it turns a question into a constrained `AnalystQuery`, and it
+later puts a calculated result into a sentence. It is never shown a price while planning,
+and never asked to work one out. Everything between — retrieval, filtering, ranking,
+percentages, eligibility, evidence — is deterministic Python over the *same*
+`build_comparison()` dataset the Quotes screen renders, so an answer can always be
+reconciled with what is on that screen.
+
+What falls out of that split:
+
+- a question the data cannot settle is **refused** in fixed words, not answered plausibly;
+- a supplier or line the RFQ does not contain is a refusal, never a silent drop;
+- "cleared QA" means a certificate we hold, and the answer says so every time;
+- a what-if ("ignore MOQ", "treat claims as verified") is **labelled** and changes only
+  what is counted — never a stored record;
+- every exclusion is listed with its reason and, where one exists, its evidence span;
+- a narration containing a figure the result does not support is discarded, and the
+  deterministic summary stands alone;
+- the analyst describes which quote is lowest; it never recommends or awards. That is
+  Phase 4.
 
 ---
 
@@ -153,8 +210,8 @@ python3 scripts/seed_phase2_demo.py   # a 7-line carton RFQ with responses regis
 
 No email of any kind, no SMTP, IMAP, Gmail or Outlook. No supplier portal, no
 authentication, no cloud deployment, no ERP integration. No second AI provider and no
-API-key management. No award recommendation, no "cheapest supplier", no best-value
-scoring: Phase 2 shows normalised prices and stops short of telling you who to pick.
+API-key management. No award workflow and no best-value score: the analyst will tell you
+which quote is lowest and why, and stops short of telling you who to pick.
 
 ## Known limitations
 
@@ -171,10 +228,18 @@ scoring: Phase 2 shows normalised prices and stops short of telling you who to p
   around 90 seconds rather than six minutes.
 - The demo dataset is fabricated. Supplier names, contacts and prices are invented.
 
-## Phase 3 readiness
+- **An analyst question takes time**: two model calls, roughly 60–120 seconds. The six
+  suggested questions on the Analyst page are pre-built queries and answer instantly with
+  no model call at all. Turning the narration off (`RFQ_ANALYST_EXPLAIN=0`) costs one call.
+- **Term evidence**: Phase 2 stores the source span for prices and minimum order
+  quantities, but not for lead time, validity, payment or delivery terms. Asking where one
+  of those came from returns the extracted wording and says plainly that no location was
+  recorded, rather than implying one.
 
-Phase 2 produces the normalised dataset Phase 3 will query, joined on stable ids:
-`rfq_id`, `line_item_id`, `supplier_id`, `response_id`, `question_id`, `field_key` and
-`evidence_id`. `SupplierService.build_comparison()` returns it in one object, so questions
-like *"who quoted Line 17, and where did that number come from?"* are already answerable
-from stored data.
+## Phase 4 readiness
+
+Phase 3 leaves the award decision untouched and gives Phase 4 what it needs to make one:
+a deterministic calculation engine (`rfq_copilot/analyst_calculations.py`) whose functions
+— cheapest by line, coverage, MOQ, lead time, qualification — are pure over the comparison
+dataset and independently testable, plus an audit trail in `analyst_queries` recording the
+structured query behind every answer, not just its prose.

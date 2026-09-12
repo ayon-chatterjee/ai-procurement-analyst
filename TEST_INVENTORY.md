@@ -1,6 +1,6 @@
 # Test inventory
 
-230 tests across 10 files. Run with `python3 -m unittest discover -s tests -t .`
+345 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -16,7 +16,10 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Document reading & supplier guards (Phase 2) | 30 |
 | Price normalisation & line matching (Phase 2) | 27 |
 | Supplier service, comparison & FX (Phase 2) | 26 |
-| **Total** | **230** |
+| Analyst calculations (Phase 3) | 59 |
+| Analyst query & explanation guards (Phase 3) | 29 |
+| Analyst service & conversation (Phase 3) | 27 |
+| **Total** | **345** |
 
 
 ## AI boundary (Claude CLI)
@@ -462,3 +465,205 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 **Revision** (1)
 
 - A later response supersedes the earlier one without deleting it
+
+
+## Analyst calculations (Phase 3)
+
+`tests/test_analyst_calculations.py`
+
+**Cheapest By Line** (14)
+
+- A basket total is only given when every line has an answer
+- A contradiction about lead time keeps the price but says so
+- A contradiction about the price excludes it
+- A line nobody could quote says so rather than showing a number
+- A minimum order above the line quantity makes a quote unusable
+- A missing quote is never treated as zero
+- Accepting unconfirmed matches is a labelled what if
+- An exact tie names both and picks neither
+- An unconfirmed line match is excluded until it is confirmed
+- An unnamed currency is excluded not guessed
+- An unresolved price basis is excluded with its note
+- Ignoring minimum orders is a labelled what if
+- The answer never recommends or awards
+- The lowest comparable price wins each line
+
+**Coverage** (4)
+
+- A supplier who never replied has no coverage and a reason
+- Coverage is counted against the lines in scope
+- Gaps are typed and never numeric
+- Line coverage says who is missing and why
+
+**Currency** (5)
+
+- A converted price names the rate its provider and its date
+- A quote with no rate is excluded rather than converted
+- One currency needs no conversion at all
+- The commonest quote currency is used when the rfq names none
+- The rfq currency is used and named as an assumption
+
+**Eligibility** (9)
+
+- A claimed certification is not a verified one
+- A document backed certification clears when the rfq names none
+- A failed or expired certification never clears even as a what if
+- A named requirement must be matched exactly
+- A required question left unanswered blocks clearance
+- A supplier who never replied is not assessed rather than failed
+- Filtering to cleared suppliers explains who it removed
+- The qualification rule is always stated
+- Treating a claim as proof is marked on the check that was promoted
+
+**Evidence Lookup** (3)
+
+- A certification lookup says a claim is only a claim
+- A price lookup returns the stored evidence record
+- A term with no recorded span is reported not invented
+
+**Lead Time** (3)
+
+- A contradicted lead time is shown both ways and not ranked
+- A range is flagged as an interpretation
+- Different starting points raise a comparability warning
+
+**Lookup** (5)
+
+- A price lookup never shows a figure the rules refused
+- A response level term appears once per supplier
+- A text filter finds the supplier and shows their own wording
+- Nothing matching says so rather than returning an empty table
+- Rows can be sorted by a shown field
+
+**Moq** (2)
+
+- A minimum order is compared with the line quantity
+- An unstated minimum order is not assumed to fit
+
+**Result Shape** (5)
+
+- A what if states the assumption and the real population
+- Every answer carries its calculation steps
+- Rows survive a round trip through json
+- The csv export carries the shown columns
+- The result is plain data the session can hold
+
+**Rfq Completeness** (1)
+
+- The percentage carries its numerator denominator and definition
+
+**Unresolved Issues** (2)
+
+- Blocking issues come first
+- It gathers review items alongside gaps and constraints
+
+**Validity** (3)
+
+- A conditional validity is never turned into a date
+- A fixed period becomes an expiry counted from the received date
+- A lapsed quote is warned about
+
+**Why Excluded** (3)
+
+- A supplier that was not excluded is said not to have been
+- A valid but dearer quote states the gap to the cheapest
+- The reason is given line by line
+
+
+## Analyst query & explanation guards (Phase 3)
+
+`tests/test_analyst_guards.py`
+
+**Explanation Guard** (5)
+
+- A faithful sentence is kept
+- A figure the result does not contain is rejected
+- A line number written plainly is still recognised
+- An empty or overlong narration is rejected
+- Award language is rejected even when the numbers are right
+
+**Line Resolution** (3)
+
+- A line is found however the buyer spells it
+- A line this rfq does not have is refused
+- Dimensions find the line they describe
+
+**Query Validation** (15)
+
+- A field cannot be listed at a grain it has no meaning at
+- A filter the intent does not honour is refused
+- A filter value naming a supplier is resolved to its id
+- A hypothetical is dropped for an intent that cannot use one
+- A lookup field we do not hold is refused rather than guessed
+- A price comparison needs one or two suppliers
+- A questionnaire key this rfq never asked is refused
+- A valid query records how each name was read
+- A value that should be a number is checked
+- An evidence lookup must say what it wants the source of
+- An operator that makes no sense for a field is refused
+- An unknown intent is refused
+- An unrecognised currency is refused
+- Unsupported carries the models own reason
+- Why excluded needs exactly one supplier
+
+**Supplier Resolution** (6)
+
+- A letter label is refused with the real names
+- A resolution is recorded so the buyer can see how it was read
+- An ambiguous name is refused with the candidates
+- An id a full name and a distinctive word all resolve
+- An unknown supplier is refused and the real names offered
+- An unknown what if exclusion is a refusal not a silent drop
+
+
+## Analyst service & conversation (Phase 3)
+
+`tests/test_analyst_service.py`
+
+**Context Scope** (2)
+
+- A line named in an earlier question does not narrow the next one
+- A supplier named in an earlier question does not narrow the next one
+
+**Explanation** (5)
+
+- A faithful narration is kept alongside the summary
+- A narration recommending a supplier is dropped
+- A narration with an invented figure is dropped
+- The answer survives the explanation failing
+- Turning narration off costs one model call
+
+**Immutability** (3)
+
+- A hypothetical exclusion leaves the database untouched
+- Running a known query needs no model at all
+- Treating claims as verified changes the answer not the records
+
+**Persistence** (5)
+
+- A refusal is recorded too
+- Both model calls are audited under their own names
+- Deleting the rfq takes its analyst history with it
+- Each question is recorded with the query it became
+- History survives a new service instance
+
+**Refusal** (5)
+
+- A refusal costs no explanation call
+- A supplier this rfq never had is refused with the real names
+- An empty question is refused before any model call
+- An rfq with no extracted responses is refused before any model call
+- An unsupported question is refused in the standard words
+
+**Stage A Parsing** (6)
+
+- A fresh question does not inherit the previous what if
+- A refinement carries the previous what if forward
+- Invalid output is retried once with the validation error
+- Several phrasings produce the same answer
+- The history it sees carries questions not results
+- The planner is never shown a price
+
+**Suggested Question** (1)
+
+- Every suggestion answers without a model call

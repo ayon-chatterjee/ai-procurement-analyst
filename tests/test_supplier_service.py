@@ -114,7 +114,9 @@ class ExtractionFlowTest(ServiceHarness):
         svc, _ = self.build([AITimeout("slow"), good, match_payload([match("Line 1", "LINE-001")])])
         r1, _ = self.register(svc, "Broken Supplier", DOC_A, "a.txt")
         r2, _ = self.register(svc, "Working Supplier", DOC_A, "b.txt")
-        results = svc.extract_all(self.rfq.id)
+        # One worker: the scripted AI hands out payloads in order, so running the two
+        # extractions in parallel would decide by a race which supplier got the timeout.
+        results = svc.extract_all(self.rfq.id, max_workers=1)
 
         self.assertEqual(results["succeeded"], ["Working Supplier"])
         self.assertEqual(len(results["failed"]), 1)

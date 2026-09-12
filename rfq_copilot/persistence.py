@@ -169,6 +169,27 @@ DDL = [
         payload TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS ix_supplier_questions_response ON supplier_questions(response_id)",
+    # Phase 3. The question and the structured query are kept; the calculated rows are
+    # not, because they can always be recomputed from the quotes and keeping a copy would
+    # create a second version of the truth that goes stale the moment a quote is corrected.
+    """CREATE TABLE IF NOT EXISTS analyst_queries (
+        id TEXT PRIMARY KEY,
+        rfq_id TEXT NOT NULL REFERENCES rfqs(id) ON DELETE CASCADE,
+        question TEXT NOT NULL DEFAULT '',
+        intent TEXT NOT NULL DEFAULT '',
+        refused INTEGER NOT NULL DEFAULT 0,
+        hypothetical INTEGER NOT NULL DEFAULT 0,
+        structured_query TEXT NOT NULL DEFAULT '{}',
+        result_summary TEXT NOT NULL DEFAULT '',
+        warnings TEXT NOT NULL DEFAULT '[]',
+        assumptions TEXT NOT NULL DEFAULT '[]',
+        comparison_currency TEXT,
+        model TEXT NOT NULL DEFAULT '',
+        prompt_version TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_analyst_queries_rfq ON analyst_queries(rfq_id, created_at)",
 ]
 
 
@@ -334,6 +355,57 @@ class RFQRepository:
 # --------------------------------------------------------------------------- #
 # Phase 2 — suppliers and their responses
 # --------------------------------------------------------------------------- #
+class AnalystRepository:
+    """Phase 3's audit trail: what was asked, how it was read, and what came back.
+
+    Storing the structured query rather than only the sentence is the point — six months
+    later "who was cheapest?" is not reproducible, but the query that produced the answer
+    is.
+    """
+
+    def __init__(self, repo: "RFQRepository"):
+        self.repo = repo
+        self._conn = repo._conn
+
+    def add_query(self, rec) -> None:
+        """Best effort, like the AI audit: losing an audit row must never cost an answer."""
+        try:
+            self._add_query(rec)
+        except Exception:
+            pass
+
+    def _add_query(self, rec) -> None:
+        with self._conn() as c:
+            c.execute("""INSERT INTO analyst_queries(id, rfq_id, question, intent, refused,
+                             hypothetical, structured_query, result_summary, warnings, assumptions,
+                             comparison_currency, model, prompt_version, duration_ms, created_at)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (rec.id, rec.rfq_id, rec.question, rec.intent, 1 if rec.refused else 0,
+                       1 if rec.hypothetical else 0, rec.structured_query, rec.result_summary,
+                       rec.warnings, rec.assumptions, rec.comparison_currency, rec.model,
+                       rec.prompt_version, rec.duration_ms, rec.created_at))
+
+    def list_queries(self, rfq_id: str, limit: int = 20) -> List[Any]:
+        """Most recent last, so a conversation reads in order."""
+        from .analyst_models import AnalystQueryRecord
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM analyst_queries WHERE rfq_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (rfq_id, int(limit))).fetchall()
+        out = []
+        for r in reversed(rows):
+            d = dict(r)
+            d["refused"] = bool(d.get("refused"))
+            d["hypothetical"] = bool(d.get("hypothetical"))
+            out.append(AnalystQueryRecord(**{k: v for k, v in d.items()
+                                             if k in AnalystQueryRecord.__dataclass_fields__}))
+        return out
+
+    def delete_for(self, rfq_id: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM analyst_queries WHERE rfq_id = ?", (rfq_id,))
+
+
 class SupplierRepository:
     """Persistence for supplier responses and everything extracted from them.
 

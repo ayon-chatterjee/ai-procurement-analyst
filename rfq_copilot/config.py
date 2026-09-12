@@ -42,6 +42,12 @@ class Settings:
     max_open_questions: int = 14
     #: Supplier extractions are independent subprocess calls, so a few run at once.
     extraction_workers: int = 4          # RFQ_EXTRACTION_WORKERS
+    #: The analyst always computes its answer; this only controls whether a second call is
+    #: made to word it. Turning it off costs prose, never correctness.
+    analyst_explain: bool = True         # RFQ_ANALYST_EXPLAIN
+    #: How many earlier questions a follow-up can refine. Only questions and the requests
+    #: they became are carried, never results.
+    analyst_context_turns: int = 4       # RFQ_ANALYST_CONTEXT_TURNS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -59,4 +65,7 @@ class Settings:
         s.max_questions_turn = _env_int("RFQ_MAX_QUESTIONS_TURN", s.max_questions_turn)
         s.max_open_questions = _env_int("RFQ_MAX_OPEN_QUESTIONS", s.max_open_questions)
         s.extraction_workers = max(1, _env_int("RFQ_EXTRACTION_WORKERS", s.extraction_workers))
+        s.analyst_explain = _env_bool("RFQ_ANALYST_EXPLAIN", s.analyst_explain)
+        s.analyst_context_turns = max(0, _env_int("RFQ_ANALYST_CONTEXT_TURNS",
+                                                  s.analyst_context_turns))
         return s
