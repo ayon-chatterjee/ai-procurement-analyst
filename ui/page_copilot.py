@@ -195,12 +195,41 @@ def _render_analyst_note(svc, rfq: RFQ) -> None:
         st.markdown(latest.content)
 
 
+#: Past roughly this much in one turn, the buyer has pasted a table as well as answering
+#: questions, and a failure is worth explaining rather than only offering a button.
+_BIG_TURN_CHARS = 2500
+
+
+def _size_hint(svc, rfq: RFQ) -> str:
+    """What to do differently, when the turn was simply very large.
+
+    A timeout on a big turn is the one failure where "try again" is not the whole answer:
+    the retry gets the full time allowance, but if the buyer sent thirty variants and
+    fourteen answers at once there is a smaller way to do it, and the screen should say so.
+    """
+    last = ""
+    for m in reversed(svc.transcript(rfq.id)):
+        if m.role == MessageRole.BUYER:
+            last = m.content or ""
+            break
+    if len(last) < _BIG_TURN_CHARS:
+        return ""
+    return ("That turn was large — %s characters. The retry gets the full time allowance. "
+            "If it fails again, send it in two parts: the answers first, then the variant "
+            "table on its own. You can also type variants straight into the line-item grid "
+            "on the Review page, which needs no analysis at all."
+            % "{:,}".format(len(last)))
+
+
 def _render_errors(svc, rfq: RFQ) -> None:
     err = st.session_state.get(state.K_ERROR)
     pending = svc.has_pending_turn(rfq)
     if not err and not pending:
         return
     st.error(err or "The last analysis didn't complete. Your answers are saved.")
+    hint = _size_hint(svc, rfq)
+    if hint:
+        st.caption(hint)
     if st.button("Try again", key="retry_btn", type="primary"):
         st.session_state.pop(state.K_ERROR, None)
         state.queue({"type": "retry", "rfq_id": rfq.id})

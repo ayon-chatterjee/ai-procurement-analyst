@@ -1,17 +1,17 @@
 # Test inventory
 
-544 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+550 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
 | Area | Tests |
 |---|---:|
-| AI boundary (Claude CLI) | 13 |
+| AI boundary (Claude CLI) | 18 |
 | Trust guards (Phase 1) | 37 |
 | Persistence | 4 |
 | Quotation Extraction Playground | 18 |
 | Supplier response test bench | 28 |
-| RFQ service flows (Phase 1) | 16 |
+| RFQ service flows (Phase 1) | 17 |
 | Schema, fields & UI glue (Phase 1) | 33 |
 | Document reading & supplier guards (Phase 2) | 37 |
 | Price normalisation & line matching (Phase 2) | 30 |
@@ -23,15 +23,17 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 59 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **544** |
+| **Total** | **550** |
 
 
 ## AI boundary (Claude CLI)
 
 `tests/test_ai_service.py`
 
-**Claude C L I Provider** (13)
+**Claude C L I Provider** (18)
 
+- A timeout says how long it waited
+- An explicit retry gets the full allowance
 - Argv and environment hygiene
 - Factory returns cli provider
 - Fast tier uses fast model
@@ -45,6 +47,9 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - Result text fallback when no structured output
 - Schema violation is invalid output
 - Session limit maps to a usage limit with its reset time
+- The deadline grows with the size of the turn
+- The deadline is capped however much is pasted
+- The deadline reaches the subprocess
 
 
 ## Trust guards (Phase 1)
@@ -227,9 +232,10 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 
 `tests/test_rfq_service.py`
 
-**Service Flow** (16)
+**Service Flow** (17)
 
 - A manual edit is not mistaken for a failed ai turn
+- A retry asks for more time than the attempt that just failed
 - Answers survive ai failure and can be retried
 - Dropped connection is retried with the same prompt
 - Empty input rejected

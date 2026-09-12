@@ -98,9 +98,10 @@ class RFQService:
             e.rfq_id = rfq.id
             raise
 
-    def _run_first_turn(self, rfq: RFQ, msg: Message) -> RFQ:
+    def _run_first_turn(self, rfq: RFQ, msg: Message, generous: bool = False) -> RFQ:
         prompt = build_first_turn_prompt(msg.content)
-        out = self._call_ai("first_turn", prompt, rfq, turn=1, turn_text=msg.content)
+        out = self._call_ai("first_turn", prompt, rfq, turn=1, turn_text=msg.content,
+                            generous=generous)
         rfq.turn = 1
         self._apply_turn_output(rfq, out, msg, turn_text=msg.content, is_first=True)
         self.repo.save_rfq(rfq)
@@ -153,12 +154,13 @@ class RFQService:
             raise RFQStateError("Nothing to retry.")
         msg = buyer_msgs[-1]
         if msg.kind == "request" and rfq.turn == 0:
-            return self._run_first_turn(rfq, msg)
+            return self._run_first_turn(rfq, msg, generous=True)
         p = msg.payload or {}
         answers, skipped, free_text = dict(p.get("answers") or {}), list(p.get("skipped") or []), str(p.get("free_text") or "")
         prompt = build_turn_prompt(rfq, answers, skipped, free_text)
         replay_text = str(p.get("turn_text") or msg.content)
-        out = self._call_ai("turn", prompt, rfq, turn=rfq.turn, turn_text=replay_text)
+        out = self._call_ai("turn", prompt, rfq, turn=rfq.turn, turn_text=replay_text,
+                            generous=True)
         self._apply_turn_output(rfq, out, msg, turn_text=replay_text, is_first=False)
         self.repo.save_rfq(rfq)
         return rfq
@@ -414,14 +416,22 @@ class RFQService:
         msg = (out.get("assistant_message") or "").strip()
         return len(msg) < 25 or msg.lower() in ("test", "ok", "done", "n/a")
 
-    def _call_ai(self, call_type: str, prompt: str, rfq: RFQ, turn: int, turn_text: str = "") -> Dict[str, Any]:
-        """One structured call; retry once on a dropped connection or invalid output. Always audited."""
+    def _call_ai(self, call_type: str, prompt: str, rfq: RFQ, turn: int, turn_text: str = "",
+                 generous: bool = False) -> Dict[str, Any]:
+        """One structured call; retry once on a dropped connection or invalid output. Always audited.
+
+        `generous` is set when the buyer has explicitly asked to try again after a failure.
+        Repeating a call with the deadline that just expired is not a retry — it is the
+        same thing again — so the second attempt gets the full allowance.
+        """
         attempt_prompt = prompt
         last_err: Optional[AIError] = None
+        timeout_s = self._deadline(prompt, generous)
         for attempt in range(self.MAX_ATTEMPTS):
             started = utc_now()
             try:
-                res = self.ai.complete_json(attempt_prompt, TURN_OUTPUT_SCHEMA, SYSTEM_PROMPT, tier="quality")
+                res = self.ai.complete_json(attempt_prompt, TURN_OUTPUT_SCHEMA, SYSTEM_PROMPT,
+                                            tier="quality", timeout_s=timeout_s)
                 if self._is_degenerate(res.data, turn_text):
                     err = AIInvalidOutput("The model returned an empty analysis of a non-empty buyer turn.", raw=res.raw)
                     self._log_call(call_type, attempt_prompt, rfq, turn, res, err, started)
@@ -447,6 +457,14 @@ class RFQService:
                 raise
         assert last_err is not None
         raise last_err
+
+    def _deadline(self, prompt: str, generous: bool) -> Optional[int]:
+        """Ask the provider how long this call may take, if it has an opinion.
+
+        Guarded because a test stub is a valid AIService and does not have to implement it.
+        """
+        fn = getattr(self.ai, "deadline_for", None)
+        return int(fn(prompt, generous)) if callable(fn) else None
 
     def _log_call(self, call_type: str, prompt: str, rfq: RFQ, turn: int, res: Optional[AIResult], err: Optional[AIError], started: str) -> None:
         rec = AICallRecord(

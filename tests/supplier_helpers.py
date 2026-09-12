@@ -113,7 +113,7 @@ class ScriptedAI:
     def model_for(self, tier: str) -> str:
         return "scripted-model"
 
-    def complete_json(self, prompt, schema, system_prompt, tier="quality"):
+    def complete_json(self, prompt, schema, system_prompt, tier="quality", timeout_s=None):
         """Serve the first queued payload that fits the schema being asked for.
 
         Dispatching by shape rather than by position keeps tests independent of how many
@@ -121,7 +121,8 @@ class ScriptedAI:
         dimensions already settle every line.
         """
         from rfq_copilot.ai_service import AIResult, validate_against
-        self.calls.append({"prompt": prompt, "system": system_prompt, "schema": schema})
+        self.calls.append({"prompt": prompt, "system": system_prompt, "schema": schema,
+                           "timeout_s": timeout_s})
         if not self.payloads:
             raise AssertionError("ScriptedAI ran out of payloads (call %d)" % len(self.calls))
 

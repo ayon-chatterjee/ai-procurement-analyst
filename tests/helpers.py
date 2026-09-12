@@ -74,8 +74,10 @@ class StubAIService(AIService):
     def model_for(self, tier: str) -> str:
         return "stub-model"
 
-    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality") -> AIResult:
-        self.calls.append({"prompt": prompt, "schema": schema, "system": system_prompt, "tier": tier})
+    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality",
+                      timeout_s: Optional[int] = None) -> AIResult:
+        self.calls.append({"prompt": prompt, "schema": schema, "system": system_prompt, "tier": tier,
+                           "timeout_s": timeout_s})
         if self.responder is not None:
             data = self.responder(prompt, schema, system_prompt)
         else:

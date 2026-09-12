@@ -359,6 +359,13 @@ splitting one line's quantity across suppliers.
 - **Extraction takes time**: roughly 30–90 seconds per supplier response. Responses are
   processed four at a time (`RFQ_EXTRACTION_WORKERS`), so a five-supplier RFQ takes
   around 90 seconds rather than six minutes.
+- **A big turn takes proportionally longer.** The deadline for one model call scales with
+  how much you sent: `RFQ_AI_TIMEOUT` (180 s) is the floor, plus `RFQ_AI_TIMEOUT_PER_KCHAR`
+  (25 s) for every thousand characters, capped at `RFQ_AI_TIMEOUT_MAX` (600 s). A turn
+  carrying a thirty-row variant table and fourteen answers is a 13,500-character prompt
+  that produces 24,000 characters of structured output and legitimately needs about four
+  minutes. **Try again** always uses the full allowance, so pressing it after a timeout
+  does something different from the attempt that failed.
 - The demo dataset is fabricated. Supplier names, contacts and prices are invented.
 
 - **An analyst question takes time**: two model calls, roughly 60–120 seconds. The six

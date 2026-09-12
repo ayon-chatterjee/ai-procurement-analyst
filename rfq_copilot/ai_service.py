@@ -50,6 +50,17 @@ class AINotAuthenticated(AIError):
 class AITimeout(AIError):
     user_message = "The analysis took too long. Your answers have been saved. Try again."
 
+    def __init__(self, message: str, raw: str = "", waited_s: Optional[int] = None):
+        super().__init__(message, raw=raw)
+        self.waited_s = waited_s
+        if waited_s:
+            # Say how long it actually waited. "Took too long" invites the buyer to press
+            # a button that will do the identical thing; a number tells them whether the
+            # request was borderline or hopeless.
+            self.user_message = (
+                "The analysis was still running after %d seconds and was stopped. Nothing "
+                "you entered was lost. Try again gives it longer." % waited_s)
+
 
 class AIUsageLimit(AIError):
     """The Claude subscription is out of capacity for now. Retrying immediately will not help."""
@@ -91,7 +102,8 @@ class AIService(ABC):
     name = "abstract"
 
     @abstractmethod
-    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality") -> AIResult:
+    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality",
+                      timeout_s: Optional[int] = None) -> AIResult:
         """Return a schema-conforming JSON object or raise an ``AIError``."""
 
     def health(self) -> Dict[str, Any]:  # pragma: no cover - overridden where meaningful
@@ -140,23 +152,45 @@ class ClaudeCLIProvider(AIService):
     def model_for(self, tier: str) -> str:
         return self.settings.model_fast if tier == "fast" else self.settings.model_quality
 
-    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality") -> AIResult:
+    def deadline_for(self, prompt: str, generous: bool = False) -> int:
+        """How long this particular call is allowed to take.
+
+        A flat deadline is wrong in both directions: too generous for "I need motors",
+        and too tight for a turn carrying a thirty-row variant table and fourteen answers
+        — which is the turn a buyer has put the most work into, and so the worst one to
+        fail. Measured: that turn needs about 250 seconds and was being given 180.
+
+        The cost is dominated by the output, and the output grows with what the buyer sent,
+        so prompt length is the best proxy we have before making the call. `generous` is
+        for an explicit retry, where the buyer has already waited out one failure and the
+        right answer is the full allowance rather than another guess.
+        """
+        if generous:
+            return self.settings.ai_timeout_max_s
+        allowance = (len(prompt) / 1000.0) * self.settings.ai_timeout_per_kchar_s
+        return int(min(self.settings.ai_timeout_max_s,
+                       self.settings.ai_timeout_s + allowance))
+
+    def complete_json(self, prompt: str, schema: Dict[str, Any], system_prompt: str, tier: str = "quality",
+                      timeout_s: Optional[int] = None) -> AIResult:
         model = self.model_for(tier)
         argv = self._argv(prompt, schema, system_prompt, model)
+        deadline = int(timeout_s) if timeout_s else self.deadline_for(prompt)
         started = time.time()
         try:
             proc = self._run(
                 argv,
                 capture_output=True,
                 text=True,
-                timeout=self.settings.ai_timeout_s,
+                timeout=deadline,
                 env=self._env(),
                 stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError:
             raise AIUnavailable("Claude CLI binary '%s' not found on PATH." % self.settings.claude_bin)
         except subprocess.TimeoutExpired as e:
-            raise AITimeout("Claude CLI timed out after %ss." % self.settings.ai_timeout_s, raw=str(e.stdout or "")[:2000])
+            raise AITimeout("Claude CLI timed out after %ss." % deadline,
+                            raw=str(e.stdout or "")[:2000], waited_s=deadline)
         duration_ms = int((time.time() - started) * 1000)
         return self._parse(proc, schema, model, duration_ms)
 

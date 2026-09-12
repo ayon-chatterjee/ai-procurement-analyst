@@ -125,6 +125,41 @@ class ServiceFlowTest(unittest.TestCase):
         self.assertFalse(svc.has_pending_turn(rfq))
         self.assertEqual(rfq.turn, 2)
 
+    def test_a_retry_asks_for_more_time_than_the_attempt_that_just_failed(self):
+        """Repeating a call with the deadline that just expired is not a retry.
+
+        A buyer whose large turn timed out pressed Try again, waited out an identical
+        180 seconds and got an identical failure. The explicit retry now gets the full
+        allowance, so pressing the button does something different from what just failed.
+        """
+        class Timed(StubAIService):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self.deadlines = []
+
+            def deadline_for(self, prompt, generous=False):
+                return 600 if generous else 180
+
+            def complete_json(self, prompt, schema, system_prompt, tier="quality", timeout_s=None):
+                self.deadlines.append(timeout_s)
+                return super().complete_json(prompt, schema, system_prompt, tier, timeout_s)
+
+        ai = Timed(outputs=[FIRST])
+        svc = make_service(ai)
+        rfq = svc.start_rfq("I need carton boxes.")
+        self.assertEqual(ai.deadlines[-1], 180, "the first attempt uses the normal deadline")
+
+        dest_q = [q for q in rfq.open_questions() if q.field_key == "destination"][0]
+        ai.outputs = [AITimeout("slow")]
+        with self.assertRaises(AITimeout):
+            svc.submit_turn(rfq.id, answers={dest_q.id: "Mumbai"}, skipped=[], free_text="")
+        self.assertEqual(ai.deadlines[-1], 180)
+
+        ai.outputs = [base_turn_output()]
+        svc.retry_last_turn(rfq.id)
+        self.assertEqual(ai.deadlines[-1], 600,
+                         "an explicit retry must not repeat the deadline that just expired")
+
     def test_failed_first_turn_keeps_the_request_and_names_the_rfq_to_retry(self):
         from rfq_copilot.ai_service import AIUsageLimit
         ai = StubAIService(outputs=[AIUsageLimit("limit reached", detail="resets 9pm")])
