@@ -390,6 +390,105 @@ class ComparisonDatasetTest(ServiceHarness):
         self.assertEqual(out.questions[0].buyer_answer, "Two colours only.")
 
 
+class OwnSupplierResponseTest(ServiceHarness):
+    """A buyer's own RFQ has to be able to receive a buyer's own supplier replies.
+
+    Until `add_response` existed the only route to quotes was the carton fixture set, so
+    an RFQ for anything else got five carton quotations, read them correctly, matched
+    nothing, and looked like broken extraction.
+    """
+
+    def _svc(self):
+        payload = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5",
+                                    ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc, _ = self.build([payload, match_payload([match("Line 1", "LINE-001")])])
+        return svc
+
+    def test_an_uploaded_response_is_registered_read_and_priced(self):
+        svc = self._svc()
+        resp = svc.add_response(self.rfq.id, "Acme Cylinders",
+                                [("acme_quote.txt", DOC_A.encode("utf-8"))],
+                                contact_email="sales@acme.example")
+        svc.extract_response(resp.id)
+        matrix = svc.build_comparison(self.rfq.id)
+        self.assertIn("Acme Cylinders", [s.name for s in matrix.suppliers])
+        cell = matrix.cell("LINE-001", resp.supplier_id)
+        self.assertEqual(cell.display, "USD 0.42")
+
+    def test_the_uploaded_file_survives_so_it_can_be_read_again(self):
+        """The documents behind a registered response are part of the record: re-running
+        extraction next week must not depend on a temp folder that has been swept."""
+        svc = self._svc()
+        resp = svc.add_response(self.rfq.id, "Acme Cylinders",
+                                [("acme_quote.txt", DOC_A.encode("utf-8"))])
+        doc = svc.store.get_bundle(resp.id).documents[0]
+        self.assertTrue(os.path.exists(doc.path), "the document must still be on disk")
+        with open(doc.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), DOC_A)
+
+    def test_a_response_needs_a_named_supplier_and_a_document(self):
+        from rfq_copilot.rfq_service import RFQStateError
+        svc = self._svc()
+        with self.assertRaises(RFQStateError):
+            svc.add_response(self.rfq.id, "   ", [("q.txt", b"x")])
+        with self.assertRaises(RFQStateError):
+            svc.add_response(self.rfq.id, "Acme Cylinders", [])
+
+    def test_a_second_reply_from_one_supplier_supersedes_the_first(self):
+        payload = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5",
+                                    ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc, _ = self.build([payload, match_payload([match("Line 1", "LINE-001")]),
+                             payload, match_payload([match("Line 1", "LINE-001")])])
+        first = svc.add_response(self.rfq.id, "Acme Cylinders", [("q1.txt", DOC_A.encode())])
+        second = svc.add_response(self.rfq.id, "Acme Cylinders", [("q2.txt", DOC_A.encode())])
+        svc.extract_response(first.id)
+        svc.extract_response(second.id)
+        active = [r for r in svc.store.list_responses(self.rfq.id) if r.is_active]
+        self.assertEqual([r.id for r in active], [second.id])
+        self.assertEqual(len(svc.store.list_responses(self.rfq.id)), 2,
+                         "the earlier reply is kept, not deleted")
+
+    def test_a_response_can_be_taken_back_out_again(self):
+        """Loading documents onto the wrong RFQ was a one-way door."""
+        svc = self._svc()
+        resp = svc.add_response(self.rfq.id, "Acme Cylinders", [("q.txt", DOC_A.encode())])
+        svc.extract_response(resp.id)
+        self.assertTrue(svc.build_comparison(self.rfq.id).suppliers)
+
+        name = svc.remove_response(resp.id)
+        self.assertEqual(name, "Acme Cylinders")
+        self.assertEqual(svc.store.list_responses(self.rfq.id), [])
+        self.assertIsNone(svc.store.get_bundle(resp.id))
+        self.assertFalse(svc.build_comparison(self.rfq.id).suppliers)
+
+    def test_removing_a_revision_makes_the_earlier_reply_active_again(self):
+        payload = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5",
+                                    ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc, _ = self.build([payload, match_payload([match("Line 1", "LINE-001")]),
+                             payload, match_payload([match("Line 1", "LINE-001")])])
+        first = svc.add_response(self.rfq.id, "Acme Cylinders", [("q1.txt", DOC_A.encode())])
+        second = svc.add_response(self.rfq.id, "Acme Cylinders", [("q2.txt", DOC_A.encode())])
+        svc.extract_response(first.id)
+        svc.extract_response(second.id)
+
+        svc.remove_response(second.id)
+        active = [r for r in svc.store.list_responses(self.rfq.id) if r.is_active]
+        self.assertEqual([r.id for r in active], [first.id],
+                         "the earlier reply must come back rather than leaving a gap")
+
+    def test_the_supplier_is_scoped_to_this_rfq_only(self):
+        svc = self._svc()
+        other = svc.repo.get_rfq(self.rfq.id)
+        other.id = "rfq_somewhere_else"
+        svc.repo.save_rfq(other)
+        svc.add_response(self.rfq.id, "Acme Cylinders", [("q.txt", DOC_A.encode())])
+        self.assertNotIn("Acme Cylinders",
+                         [s.name for s in svc.build_comparison("rfq_somewhere_else").suppliers])
+
+
 class ConflictResolutionTest(ServiceHarness):
     """A contradiction the system will not arbitrate, the buyer can settle."""
 

@@ -6,8 +6,10 @@ the normalised comparison dataset that Phase 3 will query.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -245,6 +247,94 @@ class SupplierService:
         self.store.invite(rfq_id, silent.id, "no_response")
         return created
 
+    def add_response(self, rfq_id: str, supplier_name: str, files: List[Tuple[str, bytes]],
+                     contact_email: str = "", country: str = "",
+                     received_at: Optional[str] = None) -> SupplierResponse:
+        """Record a supplier reply the buyer actually received, with their own documents.
+
+        The demo fixtures answer one specific RFQ about carton boxes. Loading them against
+        an RFQ for something else registers five carton quotations, reads them correctly,
+        and then matches nothing — which looks exactly like the extraction failing. This is
+        the path for a real RFQ: the buyer's own files, for their own suppliers.
+
+        Uploads are written under the database directory rather than a temp folder,
+        because a registered response is part of the record: its documents have to still be
+        there when someone re-runs extraction or opens the evidence for a price next week.
+        """
+        rfq = self.repo.get_rfq(rfq_id)
+        if rfq is None:
+            raise RFQStateError("RFQ %s not found" % rfq_id)
+        name = (supplier_name or "").strip()
+        if not name:
+            raise RFQStateError("Give the supplier a name so their quote can be attributed.")
+        if not files:
+            raise RFQStateError("Attach at least one document from %s." % name)
+
+        supplier = next((s for s in self.store.list_suppliers()
+                         if s.name.strip().lower() == name.lower()), None)
+        if supplier is None:
+            supplier = Supplier(name=name, country=country.strip(),
+                                contact_email=contact_email.strip())
+        supplier.status = SupplierStatus.RESPONDED
+        if contact_email.strip():
+            supplier.contact_email = contact_email.strip()
+        if country.strip():
+            supplier.country = country.strip()
+        self.store.save_supplier(supplier)
+
+        folder = os.path.join(os.path.dirname(self.settings.db_path), "uploads", rfq_id,
+                              "%s_%s" % (supplier.id, int(time.time())))
+        os.makedirs(folder, exist_ok=True)
+        names: List[str] = []
+        for filename, data in files:
+            safe = os.path.basename(filename or "attachment") or "attachment"
+            with open(os.path.join(folder, safe), "wb") as f:
+                f.write(data)
+            names.append(safe)
+
+        # A second reply from the same supplier supersedes the first, which is what the
+        # revision chain already means everywhere else.
+        is_revision = any(r.supplier_id == supplier.id for r in self.store.list_responses(rfq_id))
+        return self._register(rfq_id, supplier, names, folder,
+                              received_at=received_at or _dt.date.today().isoformat(),
+                              is_revision=is_revision)
+
+    def remove_response(self, response_id: str) -> str:
+        """Take a supplier response back out of an RFQ, and say whose it was.
+
+        Needed because loading the demo documents onto an RFQ they do not describe was a
+        one-way door: five carton quotations would sit against an RFQ for something else
+        with no way to clear them. Removing one re-resolves the revision chain, so an
+        earlier reply from the same supplier becomes active again rather than leaving the
+        RFQ with nothing where there was something.
+        """
+        bundle = self.store.get_bundle(response_id)
+        if bundle is None:
+            raise RFQStateError("That supplier response no longer exists.")
+        name = bundle.supplier.name if bundle.supplier else "the supplier"
+        rfq_id = bundle.response.rfq_id
+        demo_names = {d["name"] for d in DEMO_SUPPLIERS}
+        supplier_id = bundle.response.supplier_id
+        with self._write_lock:
+            self.store.delete_response(response_id)
+            self._resolve_revisions(rfq_id, supplier_id)
+            # The invitation was written when this response was registered. With nothing
+            # left from this supplier, leaving it behind would keep them in the comparison
+            # as a column of "no response" — which is not what removing their reply means.
+            if not [r for r in self.store.list_responses(rfq_id) if r.supplier_id == supplier_id]:
+                self.store.uninvite(rfq_id, supplier_id)
+            # The demo set includes a supplier who never replies, invited alongside the
+            # five who do. Once the last of those five is gone, keeping them would leave a
+            # carton supplier haunting an RFQ whose demo documents have been removed.
+            if name in demo_names and not [r for r in self.store.list_responses(rfq_id)
+                                           if (self.store.get_supplier(r.supplier_id) or
+                                               Supplier()).name in demo_names]:
+                silent = next((s for s in self.store.list_invited(rfq_id)
+                               if s.name == SILENT_SUPPLIER["name"]), None)
+                if silent is not None:
+                    self.store.uninvite(rfq_id, silent.id)
+        return name
+
     def register_response(self, rfq_id: str, supplier: Supplier, filenames: List[str], folder: str,
                           received_at: str, is_revision: bool = False) -> SupplierResponse:
         """Record that a supplier response arrived, without reading it yet.
@@ -362,9 +452,19 @@ class SupplierService:
     def _resolve_revisions(self, rfq_id: str, supplier_id: str) -> None:
         """The newest response for a supplier is the active one; earlier ones are kept."""
         responses = [r for r in self.store.list_responses(rfq_id) if r.supplier_id == supplier_id]
-        if len(responses) < 2:
+        if not responses:
             return
-        sg.resolve_revision_chain(responses)
+        if len(responses) == 1:
+            # A lone response is the active one. Returning early instead left a response
+            # that had been superseded still marked inactive after its replacement was
+            # removed, so the supplier silently vanished from the comparison while their
+            # quotation was still on file.
+            only = responses[0]
+            if only.is_active and not only.superseded_by_id:
+                return
+            only.is_active, only.superseded_by_id, only.revises_response_id = True, None, None
+        else:
+            sg.resolve_revision_chain(responses)
         for r in responses:
             bundle = self.store.get_bundle(r.id)
             if bundle:

@@ -1,6 +1,6 @@
 # Test inventory
 
-550 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+557 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -15,7 +15,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Schema, fields & UI glue (Phase 1) | 33 |
 | Document reading & supplier guards (Phase 2) | 37 |
 | Price normalisation & line matching (Phase 2) | 30 |
-| Supplier service, comparison & FX (Phase 2) | 34 |
+| Supplier service, comparison & FX (Phase 2) | 41 |
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 31 |
 | Analyst service & conversation (Phase 3) | 27 |
@@ -23,7 +23,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 59 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **550** |
+| **Total** | **557** |
 
 
 ## AI boundary (Claude CLI)
@@ -493,6 +493,16 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - One supplier failing does not stop the others
 - Response type reflects partial coverage
 - The matching call is skipped only when dimensions settle every line
+
+**Own Supplier Response** (7)
+
+- A response can be taken back out again
+- A response needs a named supplier and a document
+- A second reply from one supplier supersedes the first
+- An uploaded response is registered read and priced
+- Removing a revision makes the earlier reply active again
+- The supplier is scoped to this rfq only
+- The uploaded file survives so it can be read again
 
 **Phase1 Still Works** (1)
 

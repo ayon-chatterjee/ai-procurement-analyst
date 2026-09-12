@@ -780,6 +780,11 @@ class SupplierRepository:
                            status=excluded.status, note=excluded.note""",
                       (rfq_id, supplier_id, status, note, utc_now()))
 
+    def uninvite(self, rfq_id: str, supplier_id: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM rfq_invitations WHERE rfq_id = ? AND supplier_id = ?",
+                      (rfq_id, supplier_id))
+
     def list_invited(self, rfq_id: str) -> List[Any]:
         """Suppliers asked to quote on this RFQ, whether or not they replied."""
         from .supplier_models import Supplier
@@ -891,6 +896,15 @@ class SupplierRepository:
             if b:
                 out.append(b)
         return out
+
+    def delete_response(self, response_id: str) -> None:
+        """Remove one response and everything read out of it.
+
+        Quotes, evidence, documents, certifications and questionnaire answers all hang off
+        `response_id` with ON DELETE CASCADE, so this is one statement rather than six.
+        """
+        with self._conn() as c:
+            c.execute("DELETE FROM supplier_responses WHERE id = ?", (response_id,))
 
     def delete_responses_for(self, rfq_id: str) -> None:
         with self._conn() as c:

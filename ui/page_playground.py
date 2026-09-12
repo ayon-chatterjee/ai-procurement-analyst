@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from rfq_copilot.document_extractor import ACCEPTED_UPLOAD_TYPES
 from rfq_copilot.playground_service import PlaygroundError
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_testbench import TestbenchError, TestRun
@@ -23,8 +24,9 @@ from . import previews
 from . import errors, state
 from .theme import badge, esc
 
-ACCEPTED = ["pdf", "xlsx", "xlsm", "xls", "csv", "tsv", "docx", "txt", "md", "eml",
-            "png", "jpg", "jpeg", "webp"]
+#: Declared next to the readers that open them, so a screen cannot offer a format nothing
+#: can read.
+ACCEPTED = ACCEPTED_UPLOAD_TYPES
 
 #: The synthetic document the bench writes the email body into.
 EMAIL_DOC = "supplier_email.txt"

@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from rfq_copilot import labels
+from rfq_copilot.document_extractor import ACCEPTED_UPLOAD_TYPES as ACCEPTED
 from rfq_copilot.ai_service import AIError
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_models import (
@@ -86,6 +87,36 @@ def _process_pending(sup) -> None:
             st.session_state[state.K_QUOTES_ERROR] = str(e)
         st.rerun()
 
+    if kind == "remove_response":
+        try:
+            name = sup.remove_response(action["response_id"])
+            state.flash("Removed %s's response and everything read from it." % name, "info")
+        except RFQStateError as e:
+            st.session_state[state.K_QUOTES_ERROR] = str(e)
+        st.rerun()
+
+    if kind == "add_response":
+        # Registering and reading are one action here: a buyer who has just uploaded a
+        # supplier's quotation means "read this", and leaving it sitting unread behind a
+        # second button is a step with no decision in it.
+        with st.status("Reading %s's response…" % action["name"], expanded=True) as status:
+            try:
+                resp = sup.add_response(action["rfq_id"], action["name"], action["files"],
+                                        contact_email=action.get("email", ""))
+                st.write("Saved %d document(s)." % len(action["files"]))
+                sup.extract_response(resp.id, on_stage=lambda t: st.write(t))
+                status.update(label="%s's response was read" % action["name"], state="complete",
+                              expanded=False)
+                state.flash("%s added. Their prices are in the comparison below."
+                            % action["name"])
+            except AIError as e:
+                status.update(label="Could not read that response", state="error")
+                st.session_state[state.K_QUOTES_ERROR] = e.user_message
+            except RFQStateError as e:
+                status.update(label="Could not add that response", state="error")
+                st.session_state[state.K_QUOTES_ERROR] = str(e)
+        st.rerun()
+
     if kind in ("extract", "extract_one"):
         with st.status("Processing supplier responses…", expanded=True) as status:
             def on_stage(name, stage_text):
@@ -146,16 +177,83 @@ def _header(rfq, sup) -> None:
     st.markdown("")
 
 
+#: What the built-in demo documents are actually about. Loading them against an RFQ for
+#: something else registers five carton quotations, reads them correctly, and matches
+#: nothing — which looks exactly like extraction failing.
+DEMO_PRODUCT_WORDS = ("carton", "box", "packaging", "corrugated")
+
+
+def _demo_suits(rfq) -> bool:
+    text = " ".join([rfq.product or "", rfq.category or "", rfq.product_type or "",
+                     rfq.title or ""]).lower()
+    return any(w in text for w in DEMO_PRODUCT_WORDS)
+
+
 def _empty_state(rfq, sup) -> None:
+    st.markdown('<div class="rfq-kicker">Supplier responses</div>', unsafe_allow_html=True)
+    st.markdown("No supplier responses have arrived for this RFQ yet. Add the replies your "
+                "suppliers sent you, or load the built-in demo set.")
+    _add_response_form(rfq, key="empty")
+
     with st.container(border=True):
-        st.markdown('<div class="rfq-kicker">Supplier responses</div>', unsafe_allow_html=True)
-        st.markdown("No supplier responses have arrived for this RFQ yet.")
-        st.caption("The demo set contains five suppliers who answer in five different formats — a spreadsheet, "
-                   "a PDF, a Word document, a plain email and a photographed quotation — plus one revision and "
-                   "one supplier who never replies. Nothing is sent or received; the files are read from disk.")
-        if st.button("Load supplier responses", type="primary", key="seed_btn"):
+        st.markdown('<div class="pg-label">Or try the demo documents</div>',
+                    unsafe_allow_html=True)
+        st.caption("Five suppliers answering **a request for corrugated carton boxes**, in "
+                   "five formats — a spreadsheet, a PDF, a Word document, a plain email and "
+                   "a photographed quotation — plus one revision and one supplier who never "
+                   "replies. Nothing is sent or received; the files are read from disk.")
+        if not _demo_suits(rfq):
+            # The failure this prevents: carton quotations attached to an RFQ for pneumatic
+            # cylinders, every cell reading "not quoted", and the product looking broken
+            # when it was in fact refusing to match a carton to a cylinder.
+            st.warning("This RFQ is for **%s**, and the demo documents quote carton boxes. "
+                       "They will load and read correctly, but nothing in them matches these "
+                       "line items, so every price will show as *not quoted*. Upload your own "
+                       "supplier replies above instead."
+                       % (rfq.product or "something else"), icon=":material/info:")
+        if st.button("Load the carton-box demo set", key="seed_btn",
+                     type="primary" if _demo_suits(rfq) else "secondary"):
             state.queue_quotes({"type": "seed", "rfq_id": rfq.id})
             st.rerun()
+
+
+def _add_response_form(rfq, key: str) -> None:
+    """Attach the documents a supplier actually sent.
+
+    Until this existed the only route to quotes was the demo fixture set, so an RFQ a buyer
+    had just built by hand had no way to receive a real reply.
+    """
+    with st.container(border=True):
+        st.markdown('<div class="pg-label">Add a supplier response</div>',
+                    unsafe_allow_html=True)
+        with st.form("add_resp_%s_%s" % (key, rfq.id), border=False):
+            c1, c2 = st.columns([2, 2])
+            with c1:
+                name = st.text_input("Supplier name", key="ar_name_%s" % key,
+                                     placeholder="e.g. Festo India Pvt Ltd")
+            with c2:
+                email = st.text_input("Contact email (optional)", key="ar_mail_%s" % key,
+                                      placeholder="sales@supplier.example")
+            files = st.file_uploader(
+                "Their quotation", type=ACCEPTED, accept_multiple_files=True,
+                key="ar_files_%s" % key,
+                help="Whatever they sent: a spreadsheet, a PDF, a Word file, the email "
+                     "itself, or a photograph of a printed quote. Several files are fine.")
+            submitted = st.form_submit_button("Add and read this response", type="primary")
+        if submitted:
+            if not (name or "").strip():
+                st.warning("Give the supplier a name so their quote can be attributed.")
+            elif not files:
+                st.warning("Attach at least one document from %s." % name.strip())
+            else:
+                state.queue_quotes({
+                    "type": "add_response", "rfq_id": rfq.id, "name": name.strip(),
+                    "email": (email or "").strip(),
+                    "files": [(f.name, f.getvalue()) for f in files]})
+                st.rerun()
+        st.caption("The file is read the same way the demo documents are: prices, terms and "
+                   "certifications are extracted, matched to your line items, and every "
+                   "figure keeps a link back to the words it came from.")
 
 
 def _summary_bar(sup, rfq) -> None:
@@ -398,6 +496,9 @@ def _correction_form(sup, q) -> None:
 
 # --------------------------------------------------------------------------- #
 def _suppliers(sup, rfq) -> None:
+    _add_response_form(rfq, key="tab")
+    st.markdown("")
+
     for bundle in sup.bundles_for(rfq.id):
         name = bundle.supplier.name if bundle.supplier else bundle.response.supplier_id
         r = bundle.response
@@ -423,6 +524,15 @@ def _suppliers(sup, rfq) -> None:
                                            ExtractionStatus.PENDING):
                     if st.button("Process", key="one_%s" % r.id, use_container_width=True):
                         state.queue_quotes({"type": "extract_one", "response_id": r.id})
+                        st.rerun()
+                # Loading documents onto the wrong RFQ used to be a one-way door.
+                with st.popover("Remove", use_container_width=True):
+                    st.caption("Removes this response and everything read from it — its "
+                               "quotes, evidence and certifications. The RFQ and every "
+                               "other supplier are untouched.")
+                    if st.button("Remove this response", key="rm_%s" % r.id,
+                                 type="primary", use_container_width=True):
+                        state.queue_quotes({"type": "remove_response", "response_id": r.id})
                         st.rerun()
 
             counts = bundle.issue_counts()

@@ -349,6 +349,13 @@ class ImageExtractor(DocumentExtractor):
 
 
 # --------------------------------------------------------------------------- #
+#: The file types the readers above can actually open, for any upload control that has to
+#: offer a choice. Kept beside the readers so adding one cannot leave a screen advertising
+#: a format nothing can read — or quietly refusing one that works.
+ACCEPTED_UPLOAD_TYPES = ["pdf", "xlsx", "xlsm", "xls", "csv", "tsv", "docx", "txt", "md",
+                         "eml", "png", "jpg", "jpeg", "webp"]
+
+
 class DocumentExtractorRegistry:
     """Picks the right extractor for a file. Unknown formats are reported, never faked."""
 
