@@ -14,14 +14,15 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from rfq_copilot import labels
 from rfq_copilot.ai_service import AIError
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_models import (
     ClaimStatus, ExtractionStatus, MatchStatus, NormalizationStatus, QuoteStatus, ResponseType,
 )
 from rfq_copilot.supplier_service import CellState
-from . import state
-from .components import render_resume_hint
+from . import errors, state
+from .components import render_no_rfq
 from .theme import badge, esc
 
 CELL_BADGE = {
@@ -33,14 +34,10 @@ CELL_BADGE = {
     CellState.NO_RESPONSE: ("na", "no response"),
 }
 
-ISSUE_LABELS = {
-    "probable_match": "Line match to confirm",
-    "unmatched": "Unmatched supplier line",
-    "conflict": "Contradictory values",
-    "unresolved_price": "Price that cannot be compared",
-    "unverified_claim": "Claim without a certificate",
-    "supplier_question": "Supplier is waiting on you",
-}
+#: Ordered so the buyer works through what blocks a comparison before what merely wants
+#: an answer. `dict` preserves insertion order, and the review tab groups by this order
+#: rather than by whatever order the service happened to return.
+ISSUE_LABELS = dict(labels.REVIEW_KINDS)
 
 
 # --------------------------------------------------------------------------- #
@@ -52,13 +49,10 @@ def render() -> None:
 
     rfq = state.current_rfq()
     if rfq is None:
-        st.markdown('<div class="rfq-kicker">Quotes &amp; comparison</div>'
-                    '<div class="rfq-title">No RFQ is open yet.</div>', unsafe_allow_html=True)
-
         def _open(rid):
             state.set_current(rid)
             st.rerun()
-        render_resume_hint(svc, "quotes", _open)
+        render_no_rfq(svc, "quotes", "Quotes & comparison", _open)
         return
 
     _header(rfq, sup)
@@ -93,7 +87,6 @@ def _process_pending(sup) -> None:
         st.rerun()
 
     if kind in ("extract", "extract_one"):
-        label = st.empty()
         with st.status("Processing supplier responses…", expanded=True) as status:
             def on_stage(name, stage_text):
                 st.write(("**%s** — %s" % (name, stage_text)) if name else stage_text)
@@ -120,7 +113,6 @@ def _process_pending(sup) -> None:
             except RFQStateError as e:
                 status.update(label="Nothing to process", state="error")
                 st.session_state[state.K_QUOTES_ERROR] = str(e)
-        label.empty()
         st.rerun()
 
 
@@ -130,7 +122,7 @@ def _header(rfq, sup) -> None:
         st.markdown('<div class="rfq-kicker">Quotes &amp; comparison</div><div class="rfq-title">%s</div>'
                     % esc(rfq.title or rfq.product), unsafe_allow_html=True)
         st.markdown('<div class="rfq-sub">%d line items · %s</div>'
-                    % (len(rfq.line_items), esc(rfq.category or "uncategorised")), unsafe_allow_html=True)
+                    % (len(rfq.line_items), esc(rfq.category or "uncategorized")), unsafe_allow_html=True)
     with c2:
         # The analyst answers questions about this same dataset; it does not copy it.
         if sup.has_responses(rfq.id) and st.button("Ask the analyst", type="primary",
@@ -183,12 +175,25 @@ def _summary_bar(sup, rfq) -> None:
                     state.queue_quotes({"type": "extract", "rfq_id": rfq.id, "only_pending": True})
                     st.rerun()
 
-    cols = st.columns(5)
-    cols[0].metric("Suppliers", s["suppliers_total"])
-    cols[1].metric("Responses", s["responses_received"], help="%d never replied" % s["no_response"])
-    cols[2].metric("Line responses", s["line_responses"], help="Supplier prices matched to an RFQ line")
-    cols[3].metric("Missing quotes", s["missing_quotes"], help="Lines a supplier did not price")
-    cols[4].metric("Need review", s["need_review"], help="Responses with something unresolved")
+    # Four numbers, each with the denominator it is counted against. The old row mixed
+    # three: two counted supplier-line pairs, one counted responses, and "Missing quotes"
+    # included every line of a supplier who never wrote back — which read as a failure of
+    # the system rather than an absence of a reply.
+    cols = st.columns(4)
+    cols[0].metric("Suppliers", "%d of %d replied" % (s["responses_received"], s["suppliers_total"]),
+                   help="Everyone invited to quote on this RFQ."
+                        + (" %d never replied." % s["no_response"] if s["no_response"] else ""))
+    cols[1].metric("Lines priced", "%d of %d" % (s["line_responses"], s["comparable_cells"]),
+                   help="Across the suppliers who replied: %d lines x %d responses. A line a "
+                        "supplier chose not to quote is an absence, not a zero."
+                        % (s["rfq_lines"], s["responses_received"]))
+    cols[2].metric("Needs review", s["review_items_total"],
+                   help="Things the system will not assert on its own, across %d response%s. "
+                        "Listed in the Needs review tab."
+                        % (s["need_review"], "" if s["need_review"] == 1 else "s"))
+    cols[3].metric("Currencies", " · ".join(s["currencies"]) or "—",
+                   help="What suppliers actually quoted in. Nothing is converted unless you "
+                        "pick a currency below.")
     _currency_control(matrix, s)
     if s.get("unnamed_currency"):
         st.warning("%d quoted price%s give a number without naming a currency. %s held out of the "
@@ -226,7 +231,7 @@ def _currency_control(matrix, summary) -> None:
                        "currency are kept and shown alongside."
                        % (summary["rate_source"], summary.get("rate_as_of") or "today"))
         if summary.get("rate_error"):
-            st.warning("Exchange rates could not be refreshed: %s" % summary["rate_error"])
+            st.warning(errors.describe_rate_error(summary["rate_error"]))
         if summary.get("unconvertible"):
             st.warning("%d price%s could not be converted and %s shown in their original currency."
                        % (summary["unconvertible"], "" if summary["unconvertible"] == 1 else "s",
@@ -255,8 +260,11 @@ def _comparison(sup, rfq) -> None:
             row[s.name] = matrix.cell(line.id, s.id).display
         rows.append(row)
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption("A figure is a comparable price. *not quoted* means the supplier did not price that line. "
-               "*needs review*, *conflict* and *unresolved* each mean something specific, explained below.")
+    st.caption("A bare figure is a comparable price. A figure marked **· review** or **· conflict** "
+               "is a number the system will not stand behind on its own — pick the line below to "
+               "see why. *not quoted* is an absence, not a zero; *unresolved* means the price "
+               "cannot be reduced to a per-piece figure; *no response* means the supplier never "
+               "replied.")
 
     # An explicit picker rather than a hidden row selection: the evidence trail is the
     # point of this screen, so reaching it should never depend on discovering a click.
@@ -450,28 +458,72 @@ def _review_queue(sup, rfq) -> None:
     if not items:
         st.success("Nothing is waiting for review. Every extracted value is traceable and unambiguous.")
         return
-    st.caption("These are the things the system is not willing to assert on its own.")
+    st.caption("These are the things the system is not willing to assert on its own. "
+               "Each one says what it is, where it came from, and what you can do about it.")
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for it in items:
         grouped.setdefault(it["kind"], []).append(it)
 
-    for kind, entries in grouped.items():
+    # Worked through in severity order rather than in whatever order the records came
+    # back: what stops a price being comparable first, what merely wants an answer last.
+    for kind in list(ISSUE_LABELS) + [k for k in grouped if k not in ISSUE_LABELS]:
+        entries = grouped.get(kind)
+        if not entries:
+            continue
         st.markdown('<div class="rfq-section-head">%s (%d)</div>'
-                    % (esc(ISSUE_LABELS.get(kind, kind)), len(entries)), unsafe_allow_html=True)
+                    % (esc(ISSUE_LABELS.get(kind, kind.replace("_", " ").capitalize())),
+                       len(entries)), unsafe_allow_html=True)
+        guidance = labels.REVIEW_GUIDANCE.get(kind)
+        if guidance:
+            st.caption(guidance)
         for it in entries:
             with st.container(border=True):
                 st.markdown("**%s** — %s" % (esc(it["supplier"]), esc(it["label"])[:140]))
+                settled = (it.get("resolution") or {}).get("value")
                 if it.get("values"):
-                    st.markdown(" vs ".join(badge("conflict", str(v)[:60]) for v in it["values"]),
-                                unsafe_allow_html=True)
+                    st.markdown(" vs ".join(
+                        badge("buyer" if settled and str(v) == settled else "conflict", str(v)[:60])
+                        for v in it["values"]), unsafe_allow_html=True)
                 if it.get("affected_lines", 0) > 1:
                     st.caption("Applies to %d quoted lines." % it["affected_lines"])
                 if it.get("detail"):
-                    st.caption(esc(it["detail"])[:300])
+                    st.caption(it["detail"][:300])
                 if kind in ("probable_match", "unmatched"):
                     _match_controls(sup, rfq, it)
                 elif kind == "supplier_question":
                     _question_controls(sup, it)
+                elif kind == "conflict":
+                    _conflict_controls(sup, it, settled)
+
+
+def _conflict_controls(sup, item, settled: str) -> None:
+    """Let the buyer record which stated value applies.
+
+    The system will not choose between two things a supplier said — it has no basis to —
+    but the buyer can ask them and write the answer down. Without this the contradiction
+    sat in the queue permanently with nothing to do about it.
+    """
+    if settled:
+        st.markdown(badge("buyer", "you recorded: %s" % settled[:60]), unsafe_allow_html=True)
+        note = (item.get("resolution") or {}).get("note")
+        if note:
+            st.caption(note[:200])
+        return
+    values = [str(v) for v in (item.get("values") or []) if v]
+    if len(values) < 2:
+        return
+    key = "cf_%s_%s" % (item["response_id"], abs(hash(item["label"])) % 100000)
+    with st.form(key, border=False):
+        choice = st.radio("Which applies?", values, key="%s_v" % key, horizontal=True)
+        note = st.text_input("How do you know?", key="%s_n" % key,
+                             placeholder="e.g. supplier confirmed by email on 14 March")
+        if st.form_submit_button("Record which applies"):
+            try:
+                sup.resolve_conflict(item["response_id"], item["label"], choice, note)
+                state.flash("Recorded: %s applies. Both stated values are kept." % choice)
+                st.rerun()
+            except RFQStateError as e:
+                st.error(str(e))
 
 
 def _match_controls(sup, rfq, item) -> None:
@@ -519,7 +571,7 @@ def _quality(sup, rfq) -> None:
         name = b.supplier.name if b.supplier else "?"
         for c in b.certifications:
             rows.append({"Supplier": name, "Certification": c.name,
-                         "Status": c.status.value.replace("_", " "),
+                         "Status": labels.label_for(labels.CLAIM, c.status.value)[1],
                          "Number": c.certificate_number or "—",
                          "Expiry": c.expiry_date or "—", "Note": c.note})
     if rows:
@@ -538,11 +590,15 @@ def _quality(sup, rfq) -> None:
         by_field = {a.field_key: a for a in b.questionnaire}
         row = {"Supplier": name}
         for q in questions:
+            # Headed by the question the buyer actually asked, not its internal field key:
+            # a column called "required_delivery_date" tells a reader nothing about what
+            # the supplier was asked.
+            col = (q.question or q.field_key)[:60]
             a = by_field.get(q.field_key)
             if a is None or a.status == ClaimStatus.MISSING:
-                row[q.field_key] = "not addressed"
+                row[col] = "not addressed"
             else:
-                row[q.field_key] = (a.answer or a.status.value)[:60]
+                row[col] = (a.answer or labels.label_for(labels.CLAIM, a.status.value)[1])[:60]
         rows.append(row)
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     st.caption("An item a supplier never addressed is shown as *not addressed*. It is never read as a no.")

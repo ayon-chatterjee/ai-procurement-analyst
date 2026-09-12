@@ -1,4 +1,9 @@
-# All of these are already present in the system Python 3.9 environment on the dev Mac.
+# The application itself needs the first three. openpyxl reads supplier quotations sent as
+# spreadsheets — without it those responses are reported as unsupported rather than guessed
+# at, which is correct but loses a format the demo relies on. Pillow is only needed to
+# regenerate the photographed fixtures; the committed ones work without it.
 streamlit>=1.49
 pandas>=2.3
 jsonschema>=4.25
+openpyxl>=3.1
+Pillow>=10.0

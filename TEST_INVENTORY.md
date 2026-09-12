@@ -1,6 +1,6 @@
 # Test inventory
 
-503 tests across 16 files. Run with `python3 -m unittest discover -s tests -t .`
+544 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -12,17 +12,18 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Quotation Extraction Playground | 18 |
 | Supplier response test bench | 28 |
 | RFQ service flows (Phase 1) | 16 |
-| Schema, fields & UI glue (Phase 1) | 31 |
-| Document reading & supplier guards (Phase 2) | 30 |
-| Price normalisation & line matching (Phase 2) | 27 |
-| Supplier service, comparison & FX (Phase 2) | 26 |
+| Schema, fields & UI glue (Phase 1) | 33 |
+| Document reading & supplier guards (Phase 2) | 37 |
+| Price normalisation & line matching (Phase 2) | 30 |
+| Supplier service, comparison & FX (Phase 2) | 34 |
 | Analyst calculations (Phase 3) | 65 |
-| Analyst query & explanation guards (Phase 3) | 29 |
+| Analyst query & explanation guards (Phase 3) | 31 |
 | Analyst service & conversation (Phase 3) | 27 |
-| Award seeding, bars & totals (Phase 5) | 53 |
+| Award seeding, bars & totals (Phase 5) | 57 |
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 59 |
-| **Total** | **503** |
+| End to end: one RFQ through every phase | 15 |
+| **Total** | **544** |
 
 
 ## AI boundary (Claude CLI)
@@ -298,9 +299,11 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - From dict tolerates unknown and missing keys
 - Json round trip preserves everything
 
-**Trust Label** (4)
+**Trust Label** (6)
 
+- An rfq status reads the same on every screen
 - Conflict shows both values
+- Every screen names a provenance the same way
 - Provenance badge never conflates ai with buyer
 - Recommended value is shown as a recommendation
 - Unknown and missing read differently
@@ -310,12 +313,22 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 
 `tests/test_supplier_extraction.py`
 
-**Certification Guard** (4)
+**Certification Guard** (8)
 
 - A bare claim is never verified
+- A day first expiry is read rather than ignored
+- A document that never mentions the certificate evidences nothing
 - A held certificate document verifies the claim
+- A quotation cannot verify its own certificate claim
+- A separate certificate document still verifies
 - An expired certificate is marked expired
 - Claiming an attachment we do not hold stays claimed
+
+**Confidence** (3)
+
+- A missing confidence takes the ceiling
+- A stated zero is not read as missing
+- An unevidenced price is capped even when the model was sure
 
 **Conflict And Revision** (3)
 
@@ -374,12 +387,15 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 
 - Dimensions are found in varied wording
 
-**Discount** (5)
+**Discount** (8)
 
 - An evaluable condition yields an effective price
+- An order that exactly meets an inclusive threshold gets the discount
 - An unevaluable condition is not guessed
 - An unmet condition leaves the base price
+- At least includes the number it names
 - The condition is never lost
+- The same order misses a strictly greater threshold
 - Threshold parsing
 
 **Lead Time And Validity** (3)
@@ -427,14 +443,25 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - An unnamed currency is counted as unconvertible not converted
 - Prices convert on request and keep their origin
 
-**Comparison Dataset** (6)
+**Comparison Dataset** (9)
 
+- A settled price carries no flag
 - A silent supplier still appears
+- A supplier invited elsewhere is not in this comparison
+- An unsettled price is flagged in the table not only below it
 - Answering a supplier question records it locally
 - Mixed currencies are reported not converted
 - One contradiction is listed once not once per line
 - Review queue surfaces what cannot be asserted
 - Summary is counted from stored data
+
+**Conflict Resolution** (5)
+
+- A resolution needs a value and a real topic
+- An open contradiction is listed for review
+- Both stated values survive the decision
+- Recording which value applies settles it
+- The headline count drops when the buyer settles something
 
 **Correction** (4)
 
@@ -603,14 +630,16 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A line this rfq does not have is refused
 - Dimensions find the line they describe
 
-**Query Validation** (15)
+**Query Validation** (17)
 
 - A field cannot be listed at a grain it has no meaning at
+- A filter operator the field cannot support is still refused
 - A filter the intent does not honour is refused
 - A filter value naming a supplier is resolved to its id
 - A hypothetical is dropped for an intent that cannot use one
 - A lookup field we do not hold is refused rather than guessed
 - A price comparison needs one or two suppliers
+- A quality filter is accepted however the model phrases it
 - A questionnaire key this rfq never asked is refused
 - A valid query records how each name was read
 - A value that should be a number is checked
@@ -719,15 +748,17 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - That is reported as a fact not an error
 - The silent supplier is never a candidate
 
-**Threshold** (9)
+**Threshold** (11)
 
 - A conditional quote validity fails the firm bar
 - A contradicted lead time fails the bar and names both values
 - A lead time above the limit fails the bar
 - A supplier with no readable lead time fails a stated limit
 - No lead time limit admits a supplier that never stated one
+- Relaxing the bar does not forgive a certificate never mentioned
 - Relaxing the bar never admits a failed certification
 - Relaxing the bar says so as an assumption
+- Relaxing the bar works when the rfq names a required certification
 - Relaxing the certification bar admits a stated certification
 - The default bar requires a document backed certification
 
@@ -742,7 +773,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - Currencies are never summed together
 - No total at all when there is no comparison currency
 
-**Validation** (17)
+**Validation** (19)
 
 - A clean award is ready to execute
 - A conditional validity warns and never blocks
@@ -751,10 +782,12 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A line with no quantity blocks execution
 - A minimum order above the line quantity blocks execution
 - A missing commercial term warns and names the term
+- A required certificate nobody holds blocks only while the bar is strict
 - A response level term is reported once not once per line
 - An award with nothing on it blocks
 - An expired quote blocks and an expiring one warns
 - An override that costs more is noted with its reason
+- An unanswered questionnaire item never blocks an award
 - An unverified certification warns when the rfq required none
 - Awarding a supplier who never replied blocks execution
 - Every finding names the field it read
@@ -909,3 +942,29 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - Starting an award seeds every line
 - The buyer can decline a line
 - The buyer can take the cheapest instead
+
+
+## End to end: one RFQ through every phase
+
+`tests/test_end_to_end.py`
+
+**Contradiction And Decision** (5)
+
+- A contradiction is surfaced with both values and can be settled
+- An override needs a reason
+- The award carries through to a letter and an order
+- The buyers override is what gets executed
+- The prompt that writes a letter never sees the injection text
+
+**End To End** (10)
+
+- A certificate nobody sent us stays a claim
+- A line a supplier declined is an absence not a zero
+- A per hundred price is reduced to one piece and says so
+- A positional match is flagged rather than asserted
+- A vague requirement becomes a structured rfq
+- An instruction hidden in a supplier email is data not a command
+- The analyst never treats a missing quote as cheapest
+- The assistant cannot pass off an unevidenced claim as the buyers
+- The same price appears at every stage
+- What the buyer said is distinguishable from what was suggested

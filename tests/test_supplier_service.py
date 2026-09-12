@@ -253,6 +253,7 @@ class ComparisonDatasetTest(ServiceHarness):
         svc.extract_response(resp.id)
         silent = Supplier(name="Silent Supplier", status=SupplierStatus.NO_RESPONSE)
         svc.store.save_supplier(silent)
+        svc.store.invite(self.rfq.id, silent.id, "no_response")
 
         s = svc.build_comparison(self.rfq.id).summary
         self.assertEqual(s["responses_received"], 1)
@@ -266,10 +267,29 @@ class ComparisonDatasetTest(ServiceHarness):
         svc, _ = self.build([])
         silent = Supplier(name="Silent Supplier", status=SupplierStatus.NO_RESPONSE)
         svc.store.save_supplier(silent)
+        svc.store.invite(self.rfq.id, silent.id, "no_response")
         matrix = svc.build_comparison(self.rfq.id)
         self.assertIn("Silent Supplier", [s.name for s in matrix.suppliers])
         self.assertEqual(matrix.cell("LINE-001", silent.id).state, CellState.NO_RESPONSE)
         self.assertEqual(matrix.cell("LINE-001", silent.id).display, "no response")
+
+    def test_a_supplier_invited_elsewhere_is_not_in_this_comparison(self):
+        """The supplier directory is global; being asked to quote is not. Reading the
+        directory wholesale once put a firm that never heard of this RFQ into its table
+        as a column of missing quotes."""
+        svc, _ = self.build([])
+        other = svc.repo.get_rfq(self.rfq.id)
+        other.id = "rfq_elsewhere"
+        svc.repo.save_rfq(other)
+        stranger = Supplier(name="Stranger Co", status=SupplierStatus.NO_RESPONSE)
+        svc.store.save_supplier(stranger)
+        svc.store.invite("rfq_elsewhere", stranger.id, "no_response")
+
+        matrix = svc.build_comparison(self.rfq.id)
+        self.assertNotIn("Stranger Co", [s.name for s in matrix.suppliers])
+        self.assertEqual(matrix.summary["suppliers_total"], 0)
+        self.assertIn("Stranger Co",
+                      [s.name for s in svc.build_comparison("rfq_elsewhere").suppliers])
 
     def test_mixed_currencies_are_reported_not_converted(self):
         usd = extraction_payload(quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5", currency="USD",
@@ -288,6 +308,34 @@ class ComparisonDatasetTest(ServiceHarness):
         cells = [matrix.cell("LINE-001", s.id).display for s in matrix.suppliers]
         self.assertTrue(any("USD" in c for c in cells) and any("EUR" in c for c in cells),
                         "each price keeps the currency the supplier used")
+
+    def test_an_unsettled_price_is_flagged_in_the_table_not_only_below_it(self):
+        """A positional guess divides just as cleanly as a confirmed price. Printing the
+        bare number made the two indistinguishable on the screen most people read."""
+        payload = extraction_payload(
+            quote_lines=[quote_line("item 2", 0.42, None, ev="item 2  2000 pcs  0.42")])
+        svc, _ = self.build([payload, match_payload([match("item 2", "LINE-002", confidence=0.5)])])
+        resp, _ = self.register(svc, "Positional Supplier", "item 2  2000 pcs  0.42", "d.txt")
+        svc.extract_response(resp.id)
+
+        matrix = svc.build_comparison(self.rfq.id)
+        flagged = [c for c in matrix.cells.values() if c.flag]
+        self.assertTrue(flagged, "a needs-review quote must carry a flag")
+        cell = flagged[0]
+        self.assertEqual(cell.flag, "review")
+        self.assertIn("·", cell.display)
+        self.assertIn("review", cell.display)
+        self.assertTrue(cell.display.startswith("USD"), "the price is still shown")
+
+    def test_a_settled_price_carries_no_flag(self):
+        payload = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5", ev="Line 1  10 x 10 x 5  2000 pcs  0.42")])
+        svc, _ = self.build([payload, match_payload([match("Line 1", "LINE-001")])])
+        resp, _ = self.register(svc, "Clean Supplier", DOC_A)
+        svc.extract_response(resp.id)
+        cell = svc.build_comparison(self.rfq.id).cell("LINE-001", resp.supplier_id)
+        self.assertEqual(cell.flag, "")
+        self.assertNotIn("·", cell.display)
 
     def test_review_queue_surfaces_what_cannot_be_asserted(self):
         payload = extraction_payload(
@@ -340,6 +388,68 @@ class ComparisonDatasetTest(ServiceHarness):
         out = svc.answer_supplier_question(resp.id, q.id, "Two colours only.")
         self.assertTrue(out.questions[0].resolved)
         self.assertEqual(out.questions[0].buyer_answer, "Two colours only.")
+
+
+class ConflictResolutionTest(ServiceHarness):
+    """A contradiction the system will not arbitrate, the buyer can settle."""
+
+    def _conflicted(self):
+        conflict = {"topic": "Production lead time",
+                    "description": "18 days on page 1, 30 days in peak season on page 3",
+                    "values": [{"value": "18 days", "evidence": evidence("18 days")},
+                               {"value": "30 days", "evidence": evidence("30 days")}]}
+        payload = extraction_payload(
+            quote_lines=[quote_line("Line 1", 0.42, "10 x 10 x 5",
+                                    ev="Line 1  10 x 10 x 5  2000 pcs  0.42")],
+            conflicts=[conflict])
+        svc, _ = self.build([payload, match_payload([match("Line 1", "LINE-001")])])
+        resp, _ = self.register(svc, "Contradicting Supplier", DOC_A)
+        svc.extract_response(resp.id)
+        return svc, resp
+
+    def test_an_open_contradiction_is_listed_for_review(self):
+        svc, resp = self._conflicted()
+        items = [i for i in svc.review_queue(self.rfq.id) if i["kind"] == "conflict"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["values"], ["18 days", "30 days"])
+        self.assertFalse(items[0]["resolution"])
+
+    def test_recording_which_value_applies_settles_it(self):
+        svc, resp = self._conflicted()
+        svc.resolve_conflict(resp.id, "Production lead time", "18 days",
+                             note="Supplier confirmed by email")
+        items = [i for i in svc.review_queue(self.rfq.id) if i["kind"] == "conflict"]
+        self.assertEqual(items[0]["resolution"]["value"], "18 days")
+        self.assertEqual(items[0]["resolution"]["by"], "buyer")
+        bundle = svc.store.get_bundle(resp.id)
+        self.assertNotIn("conflicts", bundle.issue_counts())
+        self.assertFalse(bundle.needs_review())
+
+    def test_both_stated_values_survive_the_decision(self):
+        svc, resp = self._conflicted()
+        svc.resolve_conflict(resp.id, "Production lead time", "18 days")
+        conflict = svc.store.get_bundle(resp.id).quotes[0].conflicts[0]
+        self.assertEqual([v["value"] for v in conflict["values"]], ["18 days", "30 days"],
+                         "a decision records what the buyer chose; it deletes nothing")
+
+    def test_the_headline_count_drops_when_the_buyer_settles_something(self):
+        """A settled item stays in the queue, shown as settled, but it is no longer
+        waiting on anyone — so the number on the dashboard has to move."""
+        svc, resp = self._conflicted()
+        before = svc.build_comparison(self.rfq.id).summary["review_items_total"]
+        svc.resolve_conflict(resp.id, "Production lead time", "18 days")
+        after = svc.build_comparison(self.rfq.id).summary["review_items_total"]
+        self.assertEqual(after, before - 1)
+        self.assertTrue([i for i in svc.review_queue(self.rfq.id) if i["kind"] == "conflict"],
+                        "it is still listed, so the record of the decision is visible")
+
+    def test_a_resolution_needs_a_value_and_a_real_topic(self):
+        from rfq_copilot.rfq_service import RFQStateError
+        svc, resp = self._conflicted()
+        with self.assertRaises(RFQStateError):
+            svc.resolve_conflict(resp.id, "Production lead time", "   ")
+        with self.assertRaises(RFQStateError):
+            svc.resolve_conflict(resp.id, "Payment terms", "30 days")
 
 
 class Phase1StillWorksTest(unittest.TestCase):

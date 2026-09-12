@@ -86,21 +86,31 @@ def normalize_price(quote: SupplierQuote) -> SupplierQuote:
 # Discounts
 # --------------------------------------------------------------------------- #
 _THRESHOLD = re.compile(
-    r"(?:above|over|exceed(?:ing|s)?|more than|greater than|at least|minimum of|from)\s*"
-    r"([0-9][0-9,\.]*)\s*(pcs|pieces|units|cartons|boxes)?", re.I)
+    r"(?P<word>above|over|exceed(?:ing|s)?|more than|greater than|at least|minimum of|from)\s*"
+    r"(?P<qty>[0-9][0-9,\.]*)\s*(pcs|pieces|units|cartons|boxes)?", re.I)
+
+#: Wordings that include the stated number. "At least 10,000" is met by exactly 10,000;
+#: "above 10,000" is not. Reading both as strictly-greater once denied a discount to an
+#: order that met its condition on the nose.
+_INCLUSIVE_WORDS = ("at least", "minimum of", "from")
 
 
-def parse_discount_threshold(condition: str) -> Optional[float]:
-    """Pull a quantity threshold out of a discount condition, if one is stated."""
+def parse_discount_threshold(condition: str) -> Optional[Tuple[float, bool]]:
+    """The quantity threshold in a discount condition and whether it includes that number.
+
+    Returns `(threshold, inclusive)`, or None when no threshold is stated.
+    """
     if not condition:
         return None
     m = _THRESHOLD.search(condition)
     if not m:
         return None
     try:
-        return float(m.group(1).replace(",", ""))
+        value = float(m.group("qty").replace(",", ""))
     except ValueError:
         return None
+    word = (m.group("word") or "").lower()
+    return value, any(word.startswith(w) for w in _INCLUSIVE_WORDS)
 
 
 def rfq_total_quantity(rfq: RFQ) -> Optional[float]:
@@ -124,7 +134,8 @@ def apply_discount(quote: SupplierQuote, rfq: Optional[RFQ] = None) -> SupplierQ
         quote.effective_unit_price = None
         return quote
 
-    threshold = parse_discount_threshold(d.condition)
+    parsed = parse_discount_threshold(d.condition)
+    threshold, inclusive = parsed if parsed else (None, False)
     if not d.condition:
         d.applies, d.applies_reason = True, "The supplier attached no condition to this discount."
     elif threshold is None:
@@ -137,10 +148,11 @@ def apply_discount(quote: SupplierQuote, rfq: Optional[RFQ] = None) -> SupplierQ
             d.applies = None
             d.applies_reason = ("The RFQ has no total quantity yet, so the %s threshold cannot be checked."
                                 % "{:,.0f}".format(threshold))
-        elif total > threshold:
+        elif total >= threshold if inclusive else total > threshold:
             d.applies = True
-            d.applies_reason = ("RFQ total of {:,.0f} exceeds the {:,.0f} threshold."
-                                .format(total, threshold))
+            d.applies_reason = ("RFQ total of {:,.0f} {} the {:,.0f} threshold."
+                                .format(total, "meets" if total == threshold else "exceeds",
+                                        threshold))
         else:
             d.applies = False
             d.applies_reason = ("RFQ total of {:,.0f} does not reach the {:,.0f} threshold."

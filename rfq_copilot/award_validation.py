@@ -250,11 +250,45 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
     # -- qualification -----------------------------------------------------
     qualification = ctx.qualifications.get(supplier_id)
     if qualification is not None and qualification.status != QualificationStatus.CLEARED.value:
-        required_failed = [c for c in qualification.checks if c.required and not c.passed]
-        severity = Severity.BLOCKING if (required_certs and required_failed) else Severity.WARNING
-        add(_finding("missing_certification", severity,
-                     "%s is %s: %s." % (name, qualification.status.replace("_", " "),
-                                        "; ".join(qualification.reasons) or "no reason recorded"),
+        # Only a failed *certification* check blocks. A questionnaire item the supplier
+        # left blank is worth knowing and gets its own warning below, but it is not a
+        # reason to refuse an award — and it used to stop one under a finding called
+        # "missing certification" whose message then talked about unanswered questions.
+        # What blocks, and what merely warns:
+        #
+        #   * A *certification* this RFQ named as required, which the supplier does not
+        #     hold in a form we can check, blocks — while the buyer's bar says a
+        #     certificate must be backed by a document we hold. Relaxing that bar is a
+        #     recorded decision, and it governs the award the same way it governs which
+        #     quote counts as best value; without that, an RFQ requiring ISO 9001 could
+        #     never be awarded to anyone who merely claims it, with nothing on screen
+        #     offering a way forward.
+        #   * A questionnaire item left blank never blocks. It gets its own warning below,
+        #     and it used to stop an award under a finding named "missing certification"
+        #     whose message then listed unanswered questions.
+        certs_failed = [c for c in qualification.checks
+                        if c.required and not c.passed and c.kind == "certification"]
+        strict = award.thresholds.require_document_backed_certification
+        blocking = bool(required_certs and certs_failed and strict)
+        if certs_failed:
+            # Lead with the thing that actually blocked. Listing every unanswered
+            # questionnaire item first buried the reason under things that do not block.
+            reasons = ["does not hold %s in a form we can verify" % " or ".join(
+                sorted({c.name for c in certs_failed}))]
+            reasons += [r for r in qualification.reasons if "did not answer" not in r]
+        else:
+            reasons = list(qualification.reasons) or ["no reason recorded"]
+        message = "%s is %s: %s." % (name, qualification.status.replace("_", " "),
+                                     "; ".join(reasons))
+        if certs_failed and blocking:
+            message += (" Either award this line to someone else, or turn off "
+                        "\"Certification must be backed by a document we hold\" in Step 1 "
+                        "— that is recorded as a decision you made.")
+        elif certs_failed:
+            message += (" Your bar allows a stated certification, so this is recorded "
+                        "rather than blocking.")
+        add(_finding("missing_certification",
+                     Severity.BLOCKING if blocking else Severity.WARNING, message,
                      "Qualification.status", supplier_id=supplier_id, supplier_name=name,
                      evidence_ids=qualification.failing_evidence_ids()))
         for check in qualification.checks:
@@ -289,6 +323,9 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
             # being committed to, so it warns rather than blocks.
             topic = (item.get("label") or "").lower()
             price_topic = "price" in topic or "cost" in topic
+            settled = bool((item.get("resolution") or {}).get("value"))
+            if kind == "conflict" and settled:
+                continue        # the buyer recorded which value applies; it is not open
             blocking = on_awarded_line and (kind != "conflict" or price_topic)
             code = "unresolved_critical_conflict" if kind == "conflict" else kind
             detail = (item.get("detail") or "")[:160]

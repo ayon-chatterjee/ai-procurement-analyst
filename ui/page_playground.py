@@ -9,6 +9,7 @@ The extraction is the real Phase 2 engine. Nothing is saved unless you choose to
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from typing import Any, Dict, List, Optional
 
@@ -19,7 +20,7 @@ from rfq_copilot.playground_service import PlaygroundError
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_testbench import TestbenchError, TestRun
 from . import previews
-from . import state
+from . import errors, state
 from .theme import badge, esc
 
 ACCEPTED = ["pdf", "xlsx", "xlsm", "xls", "csv", "tsv", "docx", "txt", "md", "eml",
@@ -88,7 +89,7 @@ def _header() -> None:
 
 
 def _reset(keep_context: bool = True) -> None:
-    for key in (state.K_PG_RUN, state.K_PG_ERROR, state.K_PG_PENDING):
+    for key in (state.K_PG_RUN, state.K_PG_ERROR, state.K_PG_PENDING, state.K_PG_SAMPLE):
         st.session_state.pop(key, None)
     for key in ("pg_body", "pg_subject", "pg_files", "pg_supplier"):
         st.session_state.pop(key, None)
@@ -195,6 +196,8 @@ def _step_compose(rfq) -> None:
         st.text_input("Subject", key="pg_subject", placeholder="Re: your enquiry")
 
     st.session_state.setdefault("pg_body", "")
+    if st.session_state.pop(state.K_PG_SAMPLE, False):
+        st.session_state["pg_body"] = SAMPLE
     st.text_area("Supplier email / quotation text", key="pg_body", height=210,
                  placeholder="Paste or type what the supplier sent back.")
     files = st.file_uploader("Supplier attachments", type=ACCEPTED, accept_multiple_files=True,
@@ -219,7 +222,10 @@ def _step_compose(rfq) -> None:
             st.rerun()
     with b:
         if st.button("Use a sample reply", use_container_width=True, key="pg_sample"):
-            st.session_state["pg_body"] = SAMPLE
+            # Not `st.session_state["pg_body"] = SAMPLE`: the text area above already
+            # exists this run, and assigning its key raises. Flag it and fill the widget
+            # on the next run, before it is created.
+            st.session_state[state.K_PG_SAMPLE] = True
             st.rerun()
     with c:
         st.caption("The sample is editable text, not a shortcut: it is extracted the same way "
@@ -257,7 +263,7 @@ def _process_pending() -> None:
                 st.session_state[state.K_PG_ERROR] = str(e)
             except Exception as e:
                 status.update(label="Something went wrong", state="error", expanded=False)
-                st.session_state[state.K_PG_ERROR] = "The requirement could not be read: %s" % str(e)[:200]
+                st.session_state[state.K_PG_ERROR] = errors.message_for(e, "reading the requirement")
         st.rerun()
 
     if kind == "run":
@@ -278,7 +284,7 @@ def _process_pending() -> None:
                 st.session_state[state.K_PG_ERROR] = str(e)
             except Exception as e:
                 status.update(label="Something went wrong", state="error", expanded=False)
-                st.session_state[state.K_PG_ERROR] = "The reply could not be processed: %s" % str(e)[:200]
+                st.session_state[state.K_PG_ERROR] = errors.message_for(e, "reading the supplier reply")
         st.rerun()
 
     if kind == "promote":
@@ -294,11 +300,22 @@ def _process_pending() -> None:
         st.rerun()
 
 
+#: How many uploaded batches to keep on disk. The document readers open files by path, so
+#: the bytes have to land somewhere — but a long session used to leave one folder per run
+#: behind forever. The current run's files must survive until its result is rendered, so
+#: the previous few are kept and older ones swept.
+_UPLOAD_KEEP = 3
+_upload_folders: List[str] = []
+
+
 def _materialise(files: List) -> List[str]:
     """Write uploaded bytes to a temp folder so the existing readers can open them."""
     if not files:
         return []
     folder = tempfile.mkdtemp(prefix="playground_upload_")
+    _upload_folders.append(folder)
+    while len(_upload_folders) > _UPLOAD_KEEP:
+        shutil.rmtree(_upload_folders.pop(0), ignore_errors=True)
     paths = []
     for name, data in files:
         path = os.path.join(folder, os.path.basename(name) or "attachment")
@@ -352,7 +369,9 @@ def _section_supplier_response(run: TestRun) -> None:
                 _attachment_card(doc, i)
 
     for name, why in run.unreadable:
-        st.error("**%s** could not be read — %s" % (esc(name), esc(why)))
+        # Not escaped: st.error renders markdown, so an escaped ampersand in a
+        # supplier filename would reach the buyer as "&amp;".
+        st.error("**%s** could not be read — %s" % (name, why))
 
 
 def _attachment_card(doc: Dict[str, Any], index: int) -> None:

@@ -47,9 +47,6 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .stChatMessage { padding: .4rem .6rem; }
 .rfq-section-head { font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--muted); margin: 1rem 0 .35rem 0; padding-bottom: .2rem; border-bottom: 1px solid var(--line); }
-.rfq-line-id { font-size: .72rem; font-weight: 700; color: var(--muted); padding-top: 1.9rem; letter-spacing: .04em; }
-.rfq-line-sep { border-bottom: 1px solid var(--line); margin: .5rem 0 .2rem 0; }
-.rfq-line { padding: .45rem 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
 .rfq-pending { display:inline-block; background:#FEF3C7; color:#92400E; font-size:.78rem; font-weight:600;
   padding:.14rem .55rem; border-radius:999px; margin:.1rem 0 .4rem 0; }
 .rfq-price { font-size: 1.15rem; font-weight: 700; color: var(--ink); }
@@ -90,7 +87,6 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .aw-step-title { font-size: 1.12rem; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }
 .aw-step-sub { font-size: .88rem; color: var(--muted); margin: .1rem 0 .7rem 0; }
 .aw-total { font-size: 1.6rem; font-weight: 700; color: var(--ink); line-height: 1.2; }
-.aw-total-sub { font-size: .84rem; color: var(--muted); }
 .aw-delta { background: #F0F9FF; border-left: 3px solid var(--brand); padding: .6rem .8rem;
   border-radius: 6px; font-size: .92rem; color: var(--ink); }
 .aw-block { background: #FEF2F2; border-left: 3px solid #DC2626; padding: .5rem .75rem;

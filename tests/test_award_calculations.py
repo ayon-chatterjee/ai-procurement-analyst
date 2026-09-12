@@ -17,6 +17,7 @@ from rfq_copilot.award_models import (
     Award, AwardLine, AwardThresholds, PickSource, Severity,
 )
 from rfq_copilot.award_validation import validate_award
+from rfq_copilot.schema import FieldStatus
 from rfq_copilot.fx import RateTable
 from rfq_copilot.supplier_models import ClaimStatus, MatchStatus, PriceBasis, QuoteStatus
 from tests.analyst_helpers import bundle, matrix, quote, silent
@@ -149,6 +150,39 @@ class ThresholdTest(unittest.TestCase):
                            certs=[("ISO 9001", ClaimStatus.FAILED)], answers=ANSWERED)
         line = proposal_for(self.rfq, [failed], th=thresholds(require_docs=False)).line("LINE-001")
         self.assertIsNone(line.best_value, "a failed certificate is a fact, not a question")
+
+    def test_relaxing_the_bar_works_when_the_rfq_names_a_required_certification(self):
+        """The case the toggle exists for, and the one where it used to do nothing.
+
+        A supplier who merely claims a certification the RFQ *requires* is NOT_CLEARED,
+        not UNVERIFIED, because a required check failed. The relaxed bar accepted only
+        CLEARED and UNVERIFIED, so on an RFQ that named a required certification every
+        claiming supplier stayed barred however the buyer set the bar — and the demo's
+        whole "relax it and watch the lines fill" moment did nothing.
+        """
+        rfq = carton_rfq(sizes=LINES)
+        rfq.fields["certifications"].value = "ISO 9001"
+        rfq.fields["certifications"].status = FieldStatus.PROVIDED
+        _, claiming = claiming_supplier(rfq, "Anhui", {"LINE-001": 0.42})
+
+        strict = proposal_for(rfq, [claiming], th=thresholds()).line("LINE-001")
+        self.assertIsNone(strict.best_value)
+        relaxed = proposal_for(rfq, [claiming], th=thresholds(require_docs=False)).line("LINE-001")
+        self.assertIsNotNone(relaxed.best_value,
+                             "relaxing the bar must admit a stated certification")
+        self.assertEqual(relaxed.best_value.supplier_name, "Anhui")
+
+    def test_relaxing_the_bar_does_not_forgive_a_certificate_never_mentioned(self):
+        """Claimed-but-unevidenced is what the buyer is choosing to accept. Silence is
+        not: there is nothing to take on trust."""
+        rfq = carton_rfq(sizes=LINES)
+        rfq.fields["certifications"].value = "ISO 9001"
+        rfq.fields["certifications"].status = FieldStatus.PROVIDED
+        _, silent = bundle(rfq, "Quiet Co", [quote(rfq, "LINE-001", 0.42)],
+                           certs=[], answers=ANSWERED)
+        line = proposal_for(rfq, [silent], th=thresholds(require_docs=False)).line("LINE-001")
+        self.assertIsNone(line.best_value)
+        self.assertIn("ISO 9001", line.absent_reason)
 
     def test_a_conditional_quote_validity_fails_the_firm_bar(self):
         _, conditional = conditional_supplier(self.rfq, "Viet", {"LINE-001": 0.30})
@@ -419,6 +453,52 @@ class ValidationTest(unittest.TestCase):
         _, report = self.check([claiming])
         self.assertIn("missing_certification", [f.code for f in report.warnings])
         self.assertTrue(report.ok_to_execute)
+
+    def test_a_required_certificate_nobody_holds_blocks_only_while_the_bar_is_strict(self):
+        """An RFQ that names a required certification, and a supplier who merely claims it.
+
+        Blocking unconditionally made such an RFQ unawardable to anyone, with nothing on
+        screen offering a way forward. The buyer's own bar — the same toggle that decides
+        which quote counts as best value — now governs it, so relaxing is a recorded
+        decision rather than an impasse.
+        """
+        rfq = carton_rfq(sizes=["10 x 10 x 5", "12 x 10 x 6"])
+        rfq.fields["certifications"].value = "ISO 9001"
+        rfq.fields["certifications"].status = FieldStatus.PROVIDED
+        _, claiming = claiming_supplier(rfq, "Anhui", {"LINE-001": 0.42, "LINE-002": 0.55})
+
+        proposal = proposal_for(rfq, [claiming], th=thresholds(require_docs=True))
+        award = award_from(rfq, proposal)
+        ctx = context_for(rfq, [claiming])
+        strict = validate_award(award, ctx, proposal, today=TODAY)
+        blocking = [f for f in strict.blocking if f.code == "missing_certification"]
+        self.assertTrue(blocking, "a required certificate we cannot verify blocks")
+        self.assertIn("in a form we can verify", blocking[0].message)
+        self.assertNotIn("did not answer", blocking[0].message,
+                         "the message must name the reason it actually blocked on")
+
+        award.thresholds = thresholds(require_docs=False)
+        relaxed = validate_award(award, ctx, proposal, today=TODAY)
+        self.assertFalse([f for f in relaxed.blocking if f.code == "missing_certification"])
+        warned = [f for f in relaxed.warnings if f.code == "missing_certification"][0]
+        self.assertIn("recorded rather than blocking", warned.message)
+
+    def test_an_unanswered_questionnaire_item_never_blocks_an_award(self):
+        """It used to, under a finding called "missing certification" whose message then
+        talked about unanswered questions."""
+        rfq = carton_rfq(sizes=["10 x 10 x 5", "12 x 10 x 6"])
+        rfq.fields["certifications"].value = "ISO 9001"
+        rfq.fields["certifications"].status = FieldStatus.PROVIDED
+        _, silent_on_questions = cleared_supplier(rfq, "Istanbul",
+                                                  {"LINE-001": 0.42, "LINE-002": 0.55})
+        silent_on_questions.questionnaire = []      # answered nothing the RFQ asked
+        proposal = proposal_for(rfq, [silent_on_questions], th=thresholds(require_docs=True))
+        award = award_from(rfq, proposal)
+        report = validate_award(award, context_for(rfq, [silent_on_questions]), proposal,
+                                today=TODAY)
+        self.assertTrue(report.ok_to_execute, "blocking: %s"
+                        % [f.message for f in report.blocking])
+        self.assertIn("missing_questionnaire_answer", [f.code for f in report.warnings])
 
     def test_a_missing_commercial_term_warns_and_names_the_term(self):
         _, terse = bundle(self.rfq, "Anhui",

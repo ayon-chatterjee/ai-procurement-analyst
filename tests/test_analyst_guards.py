@@ -95,6 +95,24 @@ class QueryValidationTest(unittest.TestCase):
     def test_an_unknown_intent_is_refused(self):
         self.assertIsInstance(check(raw_query("do_my_taxes")), Refusal)
 
+    def test_a_quality_filter_is_accepted_however_the_model_phrases_it(self):
+        """Found on a live run: "only among suppliers who cleared QA" — the question the
+        demo is built around — was refused whenever the model wrote `in` rather than `is`,
+        even though the calculation asks the same set-membership question either way."""
+        for op in ("is", "in", "not_in"):
+            query = check(raw_query("cheapest_by_line",
+                                    filters=[{"field": "eligibility", "op": op,
+                                              "values": ["cleared"]}]))
+            self.assertNotIsInstance(query, Refusal,
+                                     "eligibility %s was refused: %r" % (op, query))
+            self.assertEqual(query.filters[0].op, op)
+
+    def test_a_filter_operator_the_field_cannot_support_is_still_refused(self):
+        refusal = check(raw_query("cheapest_by_line",
+                                  filters=[{"field": "eligibility", "op": "lte",
+                                            "values": ["cleared"]}]))
+        self.assertIsInstance(refusal, Refusal)
+
     def test_unsupported_carries_the_models_own_reason(self):
         result = check(raw_query("unsupported",
                                  unsupported_reason="that needs market data we do not hold"))

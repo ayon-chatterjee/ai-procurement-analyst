@@ -19,8 +19,8 @@ from rfq_copilot.analyst_models import AnalystResult
 from rfq_copilot.analyst_service import AnalystError
 from rfq_copilot.rfq_service import RFQStateError
 
-from . import state
-from .components import render_resume_hint
+from . import errors, state
+from .components import render_no_rfq
 from .theme import badge, esc
 
 #: Kinds of exclusion that are a supplier's own choice or silence, rather than something
@@ -37,10 +37,8 @@ def render() -> None:
 
     rfq = state.current_rfq()
     if rfq is None:
-        st.markdown('<div class="rfq-kicker">Procurement analyst</div>'
-                    '<div class="rfq-title">Ask about a request for quotation</div>',
-                    unsafe_allow_html=True)
-        render_resume_hint(svc, "an", lambda rfq_id: (state.set_current(rfq_id), st.rerun()))
+        render_no_rfq(svc, "an", "Procurement analyst",
+                      lambda rfq_id: (state.set_current(rfq_id), st.rerun()))
         return
 
     _header(rfq, sup)
@@ -50,6 +48,24 @@ def render() -> None:
 
     _ask_box(rfq)
     _conversation(rfq, sup)
+    _handoff(rfq)
+
+
+def _handoff(rfq) -> None:
+    """Where this page ends.
+
+    The analyst explains and stops — `analyst_guards._AWARD_LANGUAGE` discards any
+    narration that strays into recommending. That boundary is the right one, but it left
+    the page with no exit: the buyer had read the answer and had nowhere to go with it.
+    """
+    st.markdown("---")
+    c1, c2 = st.columns([2, 5])
+    with c1:
+        if st.button("Take a decision", use_container_width=True, key="an_to_award"):
+            state.go("award")
+    with c2:
+        st.caption("The analyst describes what the quotes say. Choosing who gets the "
+                   "business happens on the award screen, where the decision is recorded.")
 
 
 # --------------------------------------------------------------------------- #
@@ -68,9 +84,10 @@ def _header(rfq, sup) -> None:
             st.markdown('<div class="rfq-sub">%d line items</div>' % len(rfq.line_items),
                         unsafe_allow_html=True)
     with c2:
-        if st.session_state.get(state.K_AN_HISTORY) and st.button(
+        store = st.session_state.get(state.K_AN_HISTORY)
+        if isinstance(store, dict) and store.get(rfq.id) and st.button(
                 "Clear conversation", use_container_width=True, key="an_clear"):
-            st.session_state.pop(state.K_AN_HISTORY, None)
+            store.pop(rfq.id, None)
             st.rerun()
     err = st.session_state.pop(state.K_AN_ERROR, None)
     if err:
@@ -80,7 +97,7 @@ def _header(rfq, sup) -> None:
 
 def _empty_state() -> None:
     with st.container(border=True):
-        st.markdown('<div class="rfq-kicker">Nothing to analyse yet</div>', unsafe_allow_html=True)
+        st.markdown('<div class="rfq-kicker">Nothing to analyze yet</div>', unsafe_allow_html=True)
         st.markdown("No supplier responses have been extracted for this RFQ, so there are "
                     "no quotes for me to work from.")
         if st.button("Go to Quotes & Comparison", type="primary", key="an_to_quotes"):
@@ -96,7 +113,7 @@ def _ask_box(rfq) -> None:
         st.rerun()
 
     svc = state.get_analyst_service()
-    labels = [label for label, _ in svc.suggested_queries(rfq.id)]
+    suggestions = [label for label, _ in svc.suggested_queries(rfq.id)]
 
     def on_pick() -> None:
         # Queueing and clearing happen in the callback: Streamlit refuses to let a script
@@ -106,7 +123,7 @@ def _ask_box(rfq) -> None:
             state.queue_analyst({"type": "suggested", "rfq_id": rfq.id, "label": label})
             st.session_state["an_suggested"] = None
 
-    st.pills("Suggested questions", labels, selection_mode="single", key="an_suggested",
+    st.pills("Suggested questions", suggestions, selection_mode="single", key="an_suggested",
              label_visibility="collapsed", on_change=on_pick)
     st.caption("Answers are calculated from the same quotes the comparison shows. "
                "Nothing here changes a supplier's record.")
@@ -137,7 +154,7 @@ def _process_pending() -> None:
                 st.session_state[state.K_AN_ERROR] = e.user_message
             except Exception as e:                     # pragma: no cover - last resort
                 status.update(label="Something went wrong", state="error", expanded=False)
-                st.session_state[state.K_AN_ERROR] = "That question could not be processed: %s" % str(e)[:200]
+                st.session_state[state.K_AN_ERROR] = errors.message_for(e, "answering that question")
         st.rerun()
 
     if action.get("type") == "suggested":
@@ -163,18 +180,26 @@ def _remember(rfq_id: str, result: AnalystResult) -> None:
     Streamlit cannot pickle live dataclasses across a source reload, so what is held here
     is `result.to_dict()`; the page renders from that alone.
     """
-    history = st.session_state.get(state.K_AN_HISTORY)
-    if not isinstance(history, list) or st.session_state.get(state.K_AN_RFQ) != rfq_id:
+    # Kept per RFQ rather than one transcript that is thrown away whenever the open RFQ
+    # changes: a buyer who steps over to the comparison, opens something else and comes
+    # back used to find their questions silently gone.
+    store = st.session_state.get(state.K_AN_HISTORY)
+    if not isinstance(store, dict):
+        store = {}
+    history = store.get(rfq_id)
+    if not isinstance(history, list):
         history = []
     history.append(result.to_dict())
-    st.session_state[state.K_AN_HISTORY] = history[-12:]
+    store[rfq_id] = history[-12:]
+    st.session_state[state.K_AN_HISTORY] = store
     st.session_state[state.K_AN_RFQ] = rfq_id
 
 
 # --------------------------------------------------------------------------- #
 def _conversation(rfq, sup) -> None:
-    history = st.session_state.get(state.K_AN_HISTORY)
-    if st.session_state.get(state.K_AN_RFQ) != rfq.id or not isinstance(history, list):
+    store = st.session_state.get(state.K_AN_HISTORY)
+    history = store.get(rfq.id) if isinstance(store, dict) else None
+    if not isinstance(history, list):
         history = []
     if not history:
         st.markdown('<div class="an-empty">Ask a question above, or pick one of the '
@@ -343,7 +368,9 @@ def _evidence(answer: Dict[str, Any], index: int, sup) -> None:
                     st.markdown('<div class="pg-span">“%s”</div>' % esc(quoted[:400]),
                                 unsafe_allow_html=True)
                 else:
-                    st.caption("Phase 2 recorded no source span for this value.")
+                    st.caption("No source location was recorded for this value — the "
+                               "wording is what the supplier wrote, but where in the "
+                               "document it appeared was not captured.")
                 st.markdown(badge("buyer" if ref.get("verified") else "recommended",
                                   "found in the document" if ref.get("verified")
                                   else "not located in the document"), unsafe_allow_html=True)

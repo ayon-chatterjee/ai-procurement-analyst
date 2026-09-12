@@ -11,7 +11,7 @@ from rfq_copilot.schema import RFQ, SECTION_LABELS, FieldStatus, FieldValue, Imp
 from . import state
 from .components import (
     BLANK_LINE_ROW, LINE_COLUMNS, SECTION_ORDER, apply_editor_deltas, describe_changes, field_value_text,
-    line_item_rows, pending_line_changes, provenance_badge, render_readiness_panel, render_resume_hint, status_badge,
+    line_item_rows, pending_line_changes, provenance_badge, render_no_rfq, render_readiness_panel, status_badge,
 )
 from .theme import badge, esc
 
@@ -21,19 +21,10 @@ def render() -> None:
     state.show_flash()
     rfq = state.current_rfq()
     if rfq is None:
-        st.markdown('<div class="rfq-hero"><h1>Review RFQ</h1><p>No RFQ is open yet.</p></div>', unsafe_allow_html=True)
-
         def _open(rid):
             state.set_current(rid)
             st.rerun()
-        render_resume_hint(svc, "review", _open)
-        st.markdown("")
-        c1, c2, _ = st.columns([1.3, 1.3, 4])
-        if c1.button("New RFQ", type="primary", use_container_width=True):
-            state.set_current(None)
-            state.go("copilot")
-        if c2.button("Saved RFQs", use_container_width=True):
-            state.go("saved")
+        render_no_rfq(svc, "review", "Review RFQ", _open)
         return
 
     _header(svc, rfq)

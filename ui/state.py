@@ -31,10 +31,14 @@ K_PG_RFQ = "pg_rfq_id"             # the RFQ being tested against
 K_PG_LINE = "pg_line_label"        # the chosen line item
 K_PG_FOCUS = "pg_focus_row"        # jump from a review issue to its table line
 K_PG_RUN = "pg_test_run"           # the current TestRun; throwaway, never persisted.
+#: Set by the "Use a sample reply" button and consumed on the next run, *before* the text
+#: area is created. Writing `pg_body` directly is a StreamlitAPIException: a widget's key
+#: cannot be assigned once the widget exists, and the button sits below the text area.
+K_PG_SAMPLE = "pg_load_sample"
 
 # Analyst (Phase 3). Values are deliberately unlike any widget key on the page: a widget
 # of the same name would overwrite the stored conversation with its own value.
-K_AN_HISTORY = "an_conversation"    # [(question, result.to_dict())] for this RFQ
+K_AN_HISTORY = "an_conversation"    # {rfq_id: [result.to_dict(), ...]}, newest last
 K_AN_PENDING = "an_pending_action"
 K_AN_ERROR = "an_error"
 K_AN_RFQ = "an_rfq_id"
@@ -140,6 +144,49 @@ def current_rfq() -> Optional[RFQ]:
     except Exception:
         st.session_state.pop(K_RFQ_ID, None)
         return None
+
+
+#: The RFQ the landing page offers first. It is the one the README's walkthrough uses and
+#: the only one seeded with every case the product is meant to handle.
+DEMO_RFQ_ID = "rfq_stress_30"
+
+
+def render_sidebar_progress() -> None:
+    """Where the open RFQ has got to, in the same four steps the navigation names.
+
+    The sidebar used to show only the Phase 1 readiness percentage, which reads as "this
+    RFQ is 0% done" long after the quotes are in and an award has been made — the score
+    stops being the story once the RFQ has been sent.
+    """
+    rfq = current_rfq()
+    if rfq is None:
+        st.caption("No RFQ open. Start one in the Copilot, or open a saved one.")
+        return
+    st.markdown("**Open RFQ**")
+    st.caption(rfq.title or rfq.product or rfq.id)
+
+    steps = [("RFQ built", rfq.completeness.ready_to_send or rfq.status.value == "supplier_ready")]
+    try:
+        sup = get_supplier_service()
+        extracted = sup.has_responses(rfq.id) and any(
+            b.response.extraction_status.value in ("extracted", "needs_review")
+            for b in sup.store.list_bundles(rfq.id, active_only=True))
+        steps.append(("Quotes read", bool(extracted)))
+    except Exception:
+        steps.append(("Quotes read", False))
+    try:
+        award = get_award_service().statuses().get(rfq.id, "")
+        steps.append(("Award made", award in ("approved", "ready_to_execute", "supplier_notified",
+                                              "order_handoff", "completed")))
+        steps.append(("Order handed off", award in ("order_handoff", "completed")))
+    except Exception:
+        steps += [("Award made", False), ("Order handed off", False)]
+
+    done = sum(1 for _, ok in steps if ok)
+    st.progress(done / float(len(steps)), text="%d of %d steps" % (done, len(steps)))
+    st.markdown('<div class="rfq-sub">%s</div>'
+                % "<br>".join("%s %s" % ("✓" if ok else "○", label) for label, ok in steps),
+                unsafe_allow_html=True)
 
 
 def set_current(rfq_id: Optional[str]) -> None:

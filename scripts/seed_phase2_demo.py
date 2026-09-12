@@ -31,6 +31,11 @@ rfq.questions=[
  Question(id='q_print', category=Section.TECHNICAL, question='Is 2-colour printing included in your price?', field_key='printing', importance=Importance.RECOMMENDED),
  Question(id='q_moq', category=Section.COMMERCIAL, question='What is your minimum order quantity per size?', field_key='quantity', importance=Importance.RECOMMENDED),
 ]
+# Without this the readiness score stays at its default 0, so the saved-RFQ list showed
+# this fixture as "Supplier-ready · 0% complete" — two statements that contradict each
+# other. The score is computed from the fields above rather than asserted.
+from rfq_copilot.guards import compute_completeness
+rfq.completeness = compute_completeness(rfq, None, rfq.turn)
 repo.save_rfq(rfq)
 svc = SupplierService(repo, get_ai_service(s), s)
 created = svc.seed_demo_responses(rfq.id)

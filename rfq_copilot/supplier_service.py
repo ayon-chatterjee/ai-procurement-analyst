@@ -28,6 +28,7 @@ from .supplier_ai_extractor import STAGES, SupplierExtractor
 from .supplier_models import (
     ClaimStatus, ExtractionStatus, MatchStatus, NormalizationStatus, QuoteStatus, ResponseBundle,
     ResponseType, Supplier, SupplierQuote, SupplierResponse, SupplierStatus, ValueSource,
+    unresolved_conflicts,
 )
 
 FIXTURE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fixtures", "suppliers")
@@ -83,11 +84,31 @@ class ComparisonCell:
         return "%s %s" % (self.quote.currency, _trim(self.quote.normalized_unit_price))
 
     @property
+    def flag(self) -> str:
+        """One word naming why this figure is not settled, or "" when it is.
+
+        A needs-review or conflicted quote can still carry a perfectly divisible number,
+        and printing that number bare made a positional guess look exactly like a
+        confirmed price. The table is the screen most people read; the doubt belongs on
+        it, not only in the drill-down beneath it.
+        """
+        if self.state == CellState.NEEDS_REVIEW:
+            return "review"
+        if self.state == CellState.CONFLICT:
+            return "conflict"
+        return ""
+
+    @property
     def display(self) -> str:
         """What the table shows: converted when we have a real rate, native otherwise."""
         if self.converted is not None:
-            return "%s %s" % (self.converted.currency, _trim(self.converted.amount))
-        return self.native_display
+            price = "%s %s" % (self.converted.currency, _trim(self.converted.amount))
+        else:
+            price = self.native_display
+        flag = self.flag
+        if flag and self.quote is not None and self.quote.normalized_unit_price is not None:
+            return "%s · %s" % (price, flag)
+        return price
 
 
 @dataclass
@@ -215,9 +236,13 @@ class SupplierService:
                 created.append(self._register(rfq_id, supplier, spec["revision"]["documents"], fixture_dir,
                                               received_at="2026-09-14", is_revision=True))
 
+        for supplier in existing.values():
+            self.store.invite(rfq_id, supplier.id, "responded")
+
         silent = existing.get(SILENT_SUPPLIER["name"]) or Supplier(**SILENT_SUPPLIER)
         silent.status = SupplierStatus.NO_RESPONSE
         self.store.save_supplier(silent)
+        self.store.invite(rfq_id, silent.id, "no_response")
         return created
 
     def register_response(self, rfq_id: str, supplier: Supplier, filenames: List[str], folder: str,
@@ -235,6 +260,7 @@ class SupplierService:
             rfq_id=rfq_id, supplier_id=supplier.id, received_at=received_at,
             response_type=ResponseType.REVISION_RECEIVED if is_revision else ResponseType.QUOTE_RECEIVED,
             extraction_status=ExtractionStatus.PENDING)
+        self.store.invite(rfq_id, supplier.id, "responded")
         bundle = ResponseBundle(response=response, supplier=supplier)
         registry = DocumentExtractorRegistry(self.settings)
         from .supplier_models import SourceDocument
@@ -361,12 +387,33 @@ class SupplierService:
         ccy = (display_currency or "").strip().upper() or None
 
         bundles = self.store.list_bundles(rfq_id, active_only=True)
-        all_suppliers = {s.id: s for s in self.store.list_suppliers()}
+        all_suppliers = self._suppliers_for(rfq_id, bundles)
         rates = self.fx.rates(ccy) if ccy else None
 
         matrix = assemble_matrix(rfq, list(all_suppliers.values()), bundles, rates, ccy)
         matrix.summary = self._summary(rfq, matrix, bundles, all_suppliers)
         return matrix
+
+    def _suppliers_for(self, rfq_id: str, bundles: List[ResponseBundle]) -> Dict[str, Supplier]:
+        """Who belongs in this RFQ's comparison: whoever replied, plus whoever was invited.
+
+        Deliberately not the whole supplier directory. That directory is global — the same
+        firm quotes on many RFQs — so reading it wholesale put every silent supplier in the
+        database into every RFQ's table as a column of missing quotes, including RFQs they
+        were never asked to quote on.
+        """
+        suppliers: Dict[str, Supplier] = {}
+        for b in bundles:
+            if b.supplier is not None:
+                suppliers[b.supplier.id] = b.supplier
+        for s in self.store.list_invited(rfq_id):
+            suppliers.setdefault(s.id, s)
+        missing = [b.response.supplier_id for b in bundles if b.supplier is None]
+        for sid in missing:
+            found = self.store.get_supplier(sid)
+            if found is not None:
+                suppliers.setdefault(found.id, found)
+        return suppliers
 
     def _summary(self, rfq: RFQ, matrix: ComparisonMatrix, bundles: List[ResponseBundle],
                  all_suppliers: Dict[str, Supplier]) -> Dict[str, Any]:
@@ -384,11 +431,21 @@ class SupplierService:
                 issues[k] = issues.get(k, 0) + v
 
         revisions = [r for r in self.store.list_responses(rfq.id) if not r.is_active]
+        # Cells belonging to suppliers who actually replied. The dashboard states prices
+        # out of *this*, not out of every line times every supplier: counting the silent
+        # supplier's lines as "missing quotes" made the headline number read as a failure
+        # of extraction rather than of a supplier who never wrote back.
+        comparable_cells = len(rfq.line_items) * len(bundles)
         return {
             "suppliers_total": len(responded) + len(no_response),
             "responses_received": len(bundles),
             "no_response": len(no_response),
             "rfq_lines": len(rfq.line_items),
+            "comparable_cells": comparable_cells,
+            # Settled items stay in the queue, shown as settled, but they are not still
+            # waiting on anyone — so the headline count goes down when the buyer acts.
+            "review_items_total": len([i for i in review_items(bundles)
+                                       if not (i.get("resolution") or {}).get("value")]),
             "line_responses": states.get(CellState.QUOTED, 0) + states.get(CellState.NEEDS_REVIEW, 0)
                               + states.get(CellState.CONFLICT, 0) + states.get(CellState.UNRESOLVED, 0),
             "missing_quotes": states.get(CellState.NOT_QUOTED, 0) + states.get(CellState.NO_RESPONSE, 0),
@@ -409,6 +466,48 @@ class SupplierService:
         }
 
     # --------------------------------------------------- human in the loop
+    def resolve_conflict(self, response_id: str, topic: str, chosen_value: str,
+                         note: str = "") -> ResponseBundle:
+        """Record which of two contradictory statements the buyer is going with.
+
+        A supplier who states an 18-day lead time on page 1 and a 30-day peak-season lead
+        time on page 3 has not made a mistake we can arbitrate — but the buyer can, by
+        asking them. This writes that decision down. Both stated values and the evidence
+        for each stay on the quote; nothing is edited away, and the resolution is
+        attributed so a reader can tell it from something the supplier wrote.
+        """
+        bundle = self.store.get_bundle(response_id)
+        if bundle is None:
+            raise RFQStateError("Supplier response %s not found" % response_id)
+        wanted = (topic or "").strip().lower()
+        value = (chosen_value or "").strip()
+        if not value:
+            raise RFQStateError("Choose which value applies before recording it.")
+
+        touched = 0
+        for q in bundle.quotes:
+            for c in q.conflicts or []:
+                if (str(c.get("topic") or "").strip().lower()) != wanted:
+                    continue
+                c["resolution"] = {"value": value, "by": "buyer", "at": utc_now(),
+                                   "note": (note or "").strip()}
+                touched += 1
+            if q.status == QuoteStatus.CONFLICT and not unresolved_conflicts(q):
+                q.status = QuoteStatus.QUOTED if q.has_price else QuoteStatus.NOT_QUOTED
+        if not touched:
+            raise RFQStateError("No open contradiction about %s on this response." % topic)
+
+        rfq = self.repo.get_rfq(bundle.response.rfq_id)
+        if rfq is not None:
+            lines_by_id = {li.id: li for li in rfq.line_items}
+            for q in bundle.quotes:
+                if q.value_source != ValueSource.BUYER_CORRECTED:
+                    refresh_derived_values(q, rfq, lines_by_id.get(q.line_item_id or ""))
+        bundle.response.extraction_status = (ExtractionStatus.NEEDS_REVIEW if bundle.needs_review()
+                                             else ExtractionStatus.EXTRACTED)
+        self.store.save_bundle(bundle)
+        return bundle
+
     def correct_quote(self, response_id: str, quote_id: str, **changes) -> ResponseBundle:
         """Apply a buyer correction. The extracted value is kept, never overwritten away."""
         bundle = self.store.get_bundle(response_id)
@@ -537,6 +636,7 @@ def review_items(bundles: List[ResponseBundle]) -> List[Dict[str, Any]]:
                          "quote_id": q.id, "label": c.get("topic") or "contradiction",
                          "detail": c.get("description", "")[:240],
                          "values": [v.get("value") for v in c.get("values", [])],
+                         "resolution": dict(c.get("resolution") or {}),
                          "affected_lines": 1}
                 seen_conflicts[key] = entry
                 items.append(entry)

@@ -170,6 +170,55 @@ class CertificationGuardTest(unittest.TestCase):
         sg.guard_certification(cert, docs, store)
         self.assertEqual(cert.status, ClaimStatus.VERIFIED)
 
+    def test_a_quotation_cannot_verify_its_own_certificate_claim(self):
+        """Found on the live demo: the model reported the quote image as the attachment,
+        so the quotation verified the claim it was making. A quote is the claim; it
+        cannot also be the proof."""
+        docs = make_documents("ISO 9001 certificate attached.", "stress_e_quote.png", "image")
+        store = {}
+        eid = sg.build_evidence({"quoted_text": "ISO 9001 certificate attached",
+                                 "location": "image line 4"}, "r", docs, store)
+        cert = Certification(raw_name="ISO 9001", document_reference="stress_e_quote.png",
+                             evidence_ids=[eid])
+        sg.guard_certification(cert, docs, store, {docs[0].id})
+        self.assertEqual(cert.status, ClaimStatus.CLAIMED)
+        self.assertIn("their quotation rather than a certificate", cert.note)
+        self.assertEqual(cert.document_id, "")
+
+    def test_a_separate_certificate_document_still_verifies(self):
+        quote, cert_doc = make_documents("Prices as attached.", "quote.png", "image")[0], \
+            make_documents("ISO 9001:2015 — certificate no. TR-9001-4471",
+                           "iso_certificate.png", "image")[0]
+        store = {}
+        eid = sg.build_evidence({"quoted_text": "ISO 9001", "location": "image line 1"},
+                                "r", [cert_doc], store)
+        cert = Certification(raw_name="ISO 9001", document_reference="iso_certificate.png",
+                             evidence_ids=[eid])
+        sg.guard_certification(cert, [quote, cert_doc], store, {quote.id})
+        self.assertEqual(cert.status, ClaimStatus.VERIFIED)
+        self.assertEqual(cert.document_id, cert_doc.id)
+
+    def test_a_document_that_never_mentions_the_certificate_evidences_nothing(self):
+        docs = make_documents("Company profile and factory photographs.",
+                              "certificates.pdf", "pdf")
+        store = {}
+        cert = Certification(raw_name="ISO 9001", document_reference="certificates.pdf")
+        sg.guard_certification(cert, docs, store)
+        self.assertEqual(cert.status, ClaimStatus.CLAIMED)
+        self.assertIn("does not mention this certificate", cert.note)
+
+    def test_a_day_first_expiry_is_read_rather_than_ignored(self):
+        """"31/12/2020" was unparseable, which left an expired certificate reading as
+        current — the one direction that matters."""
+        docs = make_documents("ISO 9001 valid until 31/12/2020", "iso_cert.pdf", "pdf")
+        store = {}
+        eid = sg.build_evidence({"quoted_text": "ISO 9001 valid until 31/12/2020",
+                                 "location": "Page 1"}, "r", docs, store)
+        cert = Certification(raw_name="ISO 9001", document_reference="iso_cert.pdf",
+                             expiry_date="31/12/2020", evidence_ids=[eid])
+        sg.guard_certification(cert, docs, store)
+        self.assertEqual(cert.status, ClaimStatus.EXPIRED)
+
     def test_an_expired_certificate_is_marked_expired(self):
         docs = make_documents("ISO 9001 valid until 2020-01-01", "iso.pdf", "pdf")
         store = {}
@@ -178,6 +227,28 @@ class CertificationGuardTest(unittest.TestCase):
                              expiry_date="2020-01-01", evidence_ids=[eid])
         sg.guard_certification(cert, docs, store)
         self.assertEqual(cert.status, ClaimStatus.EXPIRED)
+
+
+class ConfidenceTest(unittest.TestCase):
+    """A confidence the model actually stated must survive being capped."""
+
+    def test_a_stated_zero_is_not_read_as_missing(self):
+        quote = SupplierQuote(unit_price=1.0, currency="USD", confidence=0.0,
+                              status=QuoteStatus.QUOTED)
+        sg.guard_quote(quote, {}, 1.0)
+        self.assertEqual(quote.confidence, 0.0,
+                         "0.0 means the model had no confidence, not that it gave none")
+
+    def test_a_missing_confidence_takes_the_ceiling(self):
+        quote = SupplierQuote(status=QuoteStatus.NOT_QUOTED, confidence=None)
+        sg.guard_quote(quote, {}, 0.75)
+        self.assertEqual(quote.confidence, 0.75)
+
+    def test_an_unevidenced_price_is_capped_even_when_the_model_was_sure(self):
+        quote = SupplierQuote(unit_price=1.0, currency="USD", confidence=0.99,
+                              status=QuoteStatus.QUOTED)
+        sg.guard_quote(quote, {}, 1.0)
+        self.assertEqual(quote.confidence, 0.4)
 
 
 class QuestionnaireGuardTest(unittest.TestCase):

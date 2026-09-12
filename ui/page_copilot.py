@@ -74,10 +74,40 @@ def _process_pending(svc) -> None:
 
 
 # --------------------------------------------------------------------------- #
+#: What the product does, in the order the navigation does it. Shown once, on the page a
+#: newcomer lands on, because "AI RFQ Copilot" alone tells them nothing about why there are
+#: four numbered screens in the sidebar.
+JOURNEY = [
+    ("1 · Describe", "Say what you need in your own words. The analyst asks only the "
+                     "questions that change what a supplier would quote."),
+    ("2 · Compare", "Supplier replies arrive as spreadsheets, PDFs, emails, photographs. "
+                    "They become one comparison, with the original wording behind every figure."),
+    ("3 · Ask", "Ask about the quotes in plain English. Every answer is calculated from "
+                "the same records the comparison shows."),
+    ("4 · Decide", "Award each line, override anything, and send each supplier a letter "
+                   "written only from their own lines."),
+]
+
+
+def _journey() -> None:
+    cols = st.columns(len(JOURNEY))
+    for col, (title, body) in zip(cols, JOURNEY):
+        with col:
+            st.markdown('<div class="rfq-kicker">%s</div>'
+                        '<div class="rfq-sub" style="margin-top:.2rem">%s</div>'
+                        % (esc(title), esc(body)), unsafe_allow_html=True)
+    st.markdown("")
+
+
 def _render_hero(svc) -> None:
     health = state.cached_health()
-    st.markdown('<div class="rfq-hero"><h1>AI RFQ Copilot</h1><p>Tell me what you want to source. I\'ll work out what suppliers need to quote accurately.</p></div>',
+    st.markdown('<div class="rfq-hero"><h1>AI Procurement Analyst</h1>'
+                '<p>Describe what you need to buy. This turns it into an RFQ suppliers can '
+                'quote against, reads their replies whatever format they arrive in, answers '
+                'your questions about them, and carries the decision through to an awarded '
+                'order — showing its working at every step.</p></div>',
                 unsafe_allow_html=True)
+    _journey()
     if not health.get("available"):
         st.error("Claude Code CLI isn't available on this machine. Install it, then run `claude` once to sign in. " + str(health.get("detail", "")))
     elif not health.get("authenticated"):
@@ -187,8 +217,12 @@ def _render_answer_surface(svc, rfq: RFQ) -> None:
     turn = rfq.turn
     with st.form("turn_form_%s_%d" % (rfq.id, turn), border=False):
         if open_qs:
-            st.markdown('<div class="rfq-kicker" style="margin-top:.6rem">%d question%s that affect%s supplier pricing</div>' % (
-                len(open_qs), "" if len(open_qs) == 1 else "s", "s" if len(open_qs) == 1 else ""), unsafe_allow_html=True)
+            # "1 question that affects" / "3 questions that affect" — the verb agrees with
+            # the noun, which the two conditionals had the wrong way round.
+            st.markdown('<div class="rfq-kicker" style="margin-top:.6rem">'
+                        '%d question%s that affect%s supplier pricing</div>'
+                        % (len(open_qs), "" if len(open_qs) == 1 else "s",
+                           "s" if len(open_qs) == 1 else ""), unsafe_allow_html=True)
             st.caption("Answer what you know. Skip anything that doesn't apply.")
             for sec in SECTION_ORDER:
                 sec_qs = [q for q in open_qs if q.category == sec]

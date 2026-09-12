@@ -74,6 +74,14 @@ def main() -> int:
     before = fingerprint(settings.db_path)
 
     print("\n=== 1. the strict default is honest about what it cannot cover ===")
+    # The copy inherits whatever was in flight, including an award left half-made in the
+    # UI. Cancelling it keeps this script re-runnable at any moment rather than only from
+    # a clean database — and cancelling is the documented way back, so using it here is
+    # also a small check that it works.
+    in_flight = svc.current(RFQ_ID)
+    if in_flight is not None:
+        svc.cancel(in_flight.id, "superseded by a smoke run")
+        print("      cancelled an award that was already in progress")
     award = svc.start(RFQ_ID)
     proposal = svc.proposal(RFQ_ID, award.thresholds, award.currency)
     empty = len(proposal.lines_with_no_best_value)

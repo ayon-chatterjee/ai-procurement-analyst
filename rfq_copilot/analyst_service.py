@@ -22,8 +22,8 @@ from .analyst_calculations import (
 )
 from .analyst_guards import guard_explanation, validate_query
 from .analyst_models import (
-    AnalystQuery, AnalystQueryRecord, AnalystResult, AnalystTurn, Hypothetical, Intent,
-    RawQuery, Refusal,
+    AnalystQuery, AnalystQueryRecord, AnalystResult, AnalystTurn, Filter, FilterField,
+    FilterOp, Hypothetical, Intent, QualificationStatus, RawQuery, Refusal,
 )
 from .analyst_prompts import (
     EXPLAIN_PROMPT_VERSION, EXPLAIN_SYSTEM_PROMPT, PARSE_PROMPT_VERSION, PARSE_SYSTEM_PROMPT,
@@ -258,6 +258,15 @@ class AnalystService:
             ("Lead times", AnalystQuery(
                 intent=Intent.LEAD_TIME_COMPARISON.value,
                 reading="How do the lead times compare?")),
+            # The question a buyer actually asks after seeing the cheapest list, and the
+            # one that shows the quality rule changing an answer. It is the same
+            # calculation with a filter, run live — nothing about it is stored.
+            ("Cheapest among QA-cleared", AnalystQuery(
+                intent=Intent.CHEAPEST_BY_LINE.value,
+                filters=[Filter(field=FilterField.ELIGIBILITY.value, op=FilterOp.IN.value,
+                                values=[QualificationStatus.CLEARED.value])],
+                reading="Which supplier is cheapest on each line, counting only suppliers "
+                        "whose quality certification we hold?")),
         ]
 
     # ---------------------------------------------------------------- AI plumbing

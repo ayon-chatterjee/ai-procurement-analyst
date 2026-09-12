@@ -128,7 +128,7 @@ class TrustLabelTest(unittest.TestCase):
         cases = {
             (FieldStatus.PROVIDED, Source.BUYER_EXPLICIT): "Buyer stated",
             (FieldStatus.PROVIDED, Source.MANUAL_EDIT): "Buyer edited",
-            (FieldStatus.RECOMMENDED, Source.AI_RECOMMENDED): "AI recommendation",
+            (FieldStatus.RECOMMENDED, Source.AI_RECOMMENDED): "AI recommended",
             (FieldStatus.UNKNOWN, Source.BUYER_EXPLICIT): "Buyer unsure",
             (FieldStatus.NOT_APPLICABLE, Source.MISSING): "Not applicable",
             (FieldStatus.CONFLICT, Source.BUYER_EXPLICIT): "Conflict",
@@ -139,6 +139,26 @@ class TrustLabelTest(unittest.TestCase):
             self.assertIn(expected, badge, "%s/%s must read %r" % (status.value, source.value, expected))
             if source == Source.AI_RECOMMENDED:
                 self.assertNotIn("Buyer", badge, "a recommendation must not be labelled as buyer input")
+
+    def test_every_screen_names_a_provenance_the_same_way(self):
+        """The badge, the line-item grid and the readiness legend once used three
+        different words for one thing, which reads as three different meanings."""
+        from rfq_copilot import labels
+        from ui.components import SOURCE_LABELS
+        self.assertEqual(labels.PROVENANCE["recommended"][1], "AI recommended")
+        self.assertEqual(SOURCE_LABELS["ai_recommended"], "AI recommended")
+        legend = {text for _, _, text in labels.PROVENANCE_MARKS}
+        self.assertIn("AI recommended", legend)
+        self.assertIn("Buyer stated", legend)
+        badge_words = {text for _, text in labels.PROVENANCE.values()}
+        self.assertTrue(legend.issubset(badge_words | {"Buyer edited"}),
+                        "the legend may not invent words the badges never use")
+
+    def test_an_rfq_status_reads_the_same_on_every_screen(self):
+        from rfq_copilot import labels
+        self.assertEqual(labels.RFQ_STATUS["draft"][1], "Draft")
+        self.assertEqual(labels.label_for(labels.RFQ_STATUS, "draft")[1], "Draft")
+        self.assertEqual(labels.label_for(labels.RFQ_STATUS, "nonsense")[1], "nonsense")
 
     def test_recommended_value_is_shown_as_a_recommendation(self):
         from ui.components import field_value_text

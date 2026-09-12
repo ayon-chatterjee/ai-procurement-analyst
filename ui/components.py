@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from rfq_copilot import labels
 from rfq_copilot.schema import (
     RFQ, SECTION_LABELS, AnswerType, FieldStatus, FieldValue, Importance, Question, RFQStatus, Section, Source,
 )
@@ -22,25 +23,25 @@ def importance_badge(imp: Importance) -> str:
 
 
 def provenance_badge(fv: FieldValue) -> str:
-    if fv.status == FieldStatus.PROVIDED:
-        return badge("edited" if fv.source == Source.MANUAL_EDIT else "buyer", "Buyer edited" if fv.source == Source.MANUAL_EDIT else "Buyer stated")
-    if fv.status == FieldStatus.RECOMMENDED:
-        return badge("ai", "AI recommendation")
-    if fv.status == FieldStatus.UNKNOWN:
-        return badge("unknown", "Buyer unsure")
-    if fv.status == FieldStatus.NOT_APPLICABLE:
-        return badge("na", "Not applicable")
-    if fv.status == FieldStatus.CONFLICT:
-        return badge("conflict", "Conflict")
-    return badge("missing", "Missing")
+    if fv.status == FieldStatus.PROVIDED and fv.source == Source.MANUAL_EDIT:
+        return badge("edited", labels.SOURCE["manual_edit"])
+    kind, text = labels.label_for(labels.PROVENANCE, fv.status.value, "missing")
+    return badge(kind, text)
 
 
 def status_badge(rfq: RFQ) -> str:
+    """The RFQ's state in the product's own words.
+
+    `ready` is computed and `supplier_ready` is something the buyer did, so both are
+    shown; everything else reads from the shared table so no two screens can disagree.
+    """
     if rfq.status == RFQStatus.SUPPLIER_READY:
-        return badge("status-sent", "Supplier-ready")
-    if rfq.completeness.ready_to_send:
-        return badge("status-ready", "Ready to send")
-    return badge("status-not", "Not ready")
+        kind, text = labels.RFQ_STATUS["supplier_ready"]
+    elif rfq.completeness.ready_to_send:
+        kind, text = labels.RFQ_STATUS["ready"]
+    else:
+        kind, text = labels.label_for(labels.RFQ_STATUS, rfq.status.value, "status-not")
+    return badge(kind, text)
 
 
 def field_value_text(fv: FieldValue) -> str:
@@ -81,12 +82,7 @@ def render_readiness_panel(rfq: RFQ) -> None:
     c = rfq.completeness
     st.markdown('<div class="rfq-kicker">RFQ readiness</div>', unsafe_allow_html=True)
     st.markdown('<div class="rfq-score">%d%%<small>complete</small></div>' % c.score, unsafe_allow_html=True)
-    if rfq.status == RFQStatus.SUPPLIER_READY:
-        st.markdown(badge("status-sent", "SUPPLIER-READY"), unsafe_allow_html=True)
-    elif c.ready_to_send:
-        st.markdown(badge("status-ready", "READY TO SEND"), unsafe_allow_html=True)
-    else:
-        st.markdown(badge("status-not", "NOT READY"), unsafe_allow_html=True)
+    st.markdown(status_badge(rfq), unsafe_allow_html=True)
     blockers = list(c.missing_required_fields) + ["Conflict: %s" % x for x in c.open_conflicts] + list(c.blocking_questions)
     if blockers:
         st.markdown("**Why it isn't ready**")
@@ -118,7 +114,9 @@ def render_readiness_panel(rfq: RFQ) -> None:
         st.markdown('<ul class="rfq-check"><li>%s<span class="lbl">%d line item%s</span> <span class="val">— %d complete</span></li></ul>' % (
             '<span class="ic ok">✓</span>' if n_ok == len(rfq.line_items) else '<span class="ic miss">⚠</span>',
             len(rfq.line_items), "" if len(rfq.line_items) == 1 else "s", n_ok), unsafe_allow_html=True)
-    st.markdown('<div class="rfq-sub" style="margin-top:.5rem">✓ Buyer provided &nbsp; ✦ AI recommended &nbsp; ⚠ Missing &nbsp; ? Buyer unsure &nbsp; — Not applicable &nbsp; ! Conflict</div>',
+    st.markdown('<div class="rfq-sub" style="margin-top:.5rem">%s</div>'
+                % " &nbsp; ".join("%s %s" % (mark, text)
+                                  for _, mark, text in labels.PROVENANCE_MARKS),
                 unsafe_allow_html=True)
 
 
@@ -200,7 +198,7 @@ def collect_answers(questions: List[Question], turn: int) -> Dict[str, object]:
 # Line items table
 # --------------------------------------------------------------------------- #
 LINE_COLUMNS = ["id", "product", "specifications", "quantity", "unit", "target_price", "required_date", "source"]
-SOURCE_LABELS = {"buyer_explicit": "Buyer stated", "manual_edit": "Buyer edited", "ai_recommended": "Needs confirmation"}
+SOURCE_LABELS = labels.SOURCE
 
 
 def line_item_rows(rfq: RFQ) -> List[Dict[str, Any]]:
@@ -213,7 +211,7 @@ def line_item_rows(rfq: RFQ) -> List[Dict[str, Any]]:
         "unit": li.unit,
         "target_price": li.target_price,
         "required_date": li.required_date or "",
-        "source": SOURCE_LABELS.get(li.source.value, li.source.value),
+        "source": SOURCE_LABELS.get(li.source.value, li.source.value.replace("_", " ")),
     } for li in rfq.line_items]
 
 
@@ -229,18 +227,75 @@ def render_resume_hint(svc, key_prefix: str, on_open) -> bool:
     rows = svc.list_rfqs()
     if not rows:
         return False
-    r = rows[0]
+
+    # The demo RFQ is offered first and by name. It is the only one carrying every case the
+    # product handles, and a newcomer who lands on whichever RFQ happens to have been
+    # touched last sees a half-finished draft instead of the thing worth looking at.
+    demo = next((r for r in rows if r.id == state_module().DEMO_RFQ_ID), None)
+    recent = next((r for r in rows if demo is None or r.id != demo.id), None)
+
+    shown = False
+    if demo is not None:
+        _open_card(demo, "Start here — the worked example",
+                   "%d line items · 5 suppliers replied in 5 formats · 1 never did"
+                   % demo.line_item_count, "%s_demo" % key_prefix, on_open, primary=True)
+        shown = True
+    if recent is not None:
+        _open_card(recent, "Pick up where you left off",
+                   "%d%% complete · %d line item%s · updated %s"
+                   % (recent.readiness_score, recent.line_item_count,
+                      "" if recent.line_item_count == 1 else "s",
+                      recent.updated_at.replace("T", " ")[:16]),
+                   "%s_resume" % key_prefix, on_open, primary=not shown)
+        shown = True
+    return shown
+
+
+def render_no_rfq(svc, page_key: str, title: str, on_open) -> None:
+    """The same empty state on every screen that needs an open RFQ.
+
+    Each page used to write its own, so the answer to "what do I do now" depended on which
+    page you happened to land on — and one of them offered no way out at all.
+    """
+    # The sentence has to match what is actually below it: on a fresh database there is no
+    # worked example to open, and promising one is worse than saying nothing.
+    has_saved = bool(svc.list_rfqs())
+    st.markdown('<div class="rfq-hero"><h1>%s</h1><p>No RFQ is open. %s</p></div>'
+                % (esc(title),
+                   "Open the worked example to see the whole product on real data, pick up "
+                   "your own work, or start something new." if has_saved else
+                   "Describe what you need to buy in the Copilot, or run "
+                   "<code>python3 scripts/seed_demo.py --extract</code> to load the worked "
+                   "example."),
+                unsafe_allow_html=True)
+    render_resume_hint(svc, page_key, on_open)
+    c1, c2, _ = st.columns([1.5, 1.5, 4])
+    with c1:
+        if st.button("Saved RFQs", key="%s_saved" % page_key, use_container_width=True):
+            state_module().go("saved")
+    with c2:
+        if st.button("New RFQ", key="%s_new" % page_key, use_container_width=True):
+            state_module().set_current(None)
+            state_module().go("copilot")
+
+
+def state_module():
+    from . import state
+    return state
+
+
+def _open_card(r, kicker: str, sub: str, key: str, on_open, primary: bool) -> None:
     with st.container(border=True):
         c1, c2 = st.columns([5, 1.6])
         with c1:
-            st.markdown('<div class="rfq-kicker">Pick up where you left off</div>', unsafe_allow_html=True)
-            st.markdown('<div class="rfq-field-value">%s</div>' % esc(r.title or r.product or r.id), unsafe_allow_html=True)
-            st.caption("%d%% complete · %d line item%s · updated %s" % (
-                r.readiness_score, r.line_item_count, "" if r.line_item_count == 1 else "s", r.updated_at.replace("T", " ")[:16]))
+            st.markdown('<div class="rfq-kicker">%s</div>' % esc(kicker), unsafe_allow_html=True)
+            st.markdown('<div class="rfq-field-value">%s</div>'
+                        % esc(r.title or r.product or r.id), unsafe_allow_html=True)
+            st.caption(sub)
         with c2:
-            if st.button("Open", key="%s_resume" % key_prefix, type="primary", use_container_width=True):
+            if st.button("Open", key=key, type="primary" if primary else "secondary",
+                         use_container_width=True):
                 on_open(r.id)
-    return True
 
 
 

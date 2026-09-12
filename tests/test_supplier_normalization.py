@@ -63,10 +63,34 @@ class NormalizationTest(unittest.TestCase):
 
 class DiscountTest(unittest.TestCase):
     def test_threshold_parsing(self):
-        self.assertEqual(parse_discount_threshold("total order quantities above 10,000 pcs"), 10000.0)
-        self.assertEqual(parse_discount_threshold("orders over 5000 units"), 5000.0)
+        self.assertEqual(parse_discount_threshold("total order quantities above 10,000 pcs"),
+                         (10000.0, False))
+        self.assertEqual(parse_discount_threshold("orders over 5000 units"), (5000.0, False))
         self.assertIsNone(parse_discount_threshold("for strategic partners"))
         self.assertIsNone(parse_discount_threshold(""))
+
+    def test_at_least_includes_the_number_it_names(self):
+        """"Above 10,000" and "at least 10,000" are different conditions, and an order of
+        exactly 10,000 meets only the second."""
+        self.assertEqual(parse_discount_threshold("at least 10,000 pcs"), (10000.0, True))
+        self.assertEqual(parse_discount_threshold("minimum of 5,000 units"), (5000.0, True))
+
+    def test_an_order_that_exactly_meets_an_inclusive_threshold_gets_the_discount(self):
+        rfq = carton_rfq(quantity=1000.0)      # 7 sizes x 1000 = 7,000
+        quote = SupplierQuote(unit_price=1.0, currency="USD",
+                              discount=Discount(percent=10.0, condition="at least 7,000 pcs"))
+        apply_discount(quote, rfq)
+        self.assertTrue(quote.discount.applies)
+        self.assertIn("meets", quote.discount.applies_reason)
+        self.assertEqual(quote.effective_unit_price, 0.9)
+
+    def test_the_same_order_misses_a_strictly_greater_threshold(self):
+        rfq = carton_rfq(quantity=1000.0)
+        quote = SupplierQuote(unit_price=1.0, currency="USD",
+                              discount=Discount(percent=10.0, condition="above 7,000 pcs"))
+        apply_discount(quote, rfq)
+        self.assertFalse(quote.discount.applies)
+        self.assertIsNone(quote.effective_unit_price)
 
     def test_an_evaluable_condition_yields_an_effective_price(self):
         rfq = carton_rfq()                      # 7 lines x 2,000 = 14,000

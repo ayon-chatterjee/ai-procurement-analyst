@@ -36,6 +36,7 @@ AREAS = [
     ("tests/test_award_calculations.py", "Award seeding, bars & totals (Phase 5)"),
     ("tests/test_award_guards.py", "Supplier communication guards (Phase 5)"),
     ("tests/test_award_service.py", "Award lifecycle, execution & audit (Phase 5)"),
+    ("tests/test_end_to_end.py", "End to end: one RFQ through every phase"),
 ]
 
 

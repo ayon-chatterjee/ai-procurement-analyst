@@ -492,7 +492,7 @@ class EvidenceLookupTest(unittest.TestCase):
         row = result.rows[0]
         self.assertEqual(row["Location"], "—")
         self.assertEqual(row["Found in document"], "no span recorded")
-        self.assertTrue(any("did not record" in w for w in result.warnings))
+        self.assertTrue(any("was not recorded" in w for w in result.warnings))
 
     def test_a_certification_lookup_says_a_claim_is_only_a_claim(self):
         supplier, b = bundle(self.rfq, "Alpha Cartons", [quote(self.rfq, "LINE-001", 0.42)],

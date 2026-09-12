@@ -28,6 +28,7 @@ from .analyst_calculations import (
     price_check, scan_prices, terms_text,
 )
 from .analyst_models import AnalystQuery, Hypothetical, Intent, QualificationStatus
+from .supplier_models import ClaimStatus
 from .award_models import (
     Award, AwardLine, AwardProposal, AwardThresholds, AwardTotals, BarResult, Candidate,
     LineProposal, PickSource, SupplierSubtotal,
@@ -76,11 +77,29 @@ def clears_bars(ctx, supplier_id: str, thresholds: AwardThresholds
         # `treat_claimed_as_verified` hypothetical: that would rewrite the Qualification
         # object and mark every check as promoted, which would misdescribe a supplier who
         # genuinely holds a document.
+        #
+        # A supplier who merely *claims* a certification the RFQ requires is NOT_CLEARED,
+        # not UNVERIFIED — the required check failed. Accepting only CLEARED/UNVERIFIED
+        # therefore made this toggle inert in the one case it exists for: an RFQ that names
+        # a required certification, where every claiming supplier stays barred however the
+        # buyer sets the bar. So the relaxed bar asks the question it means to ask — is
+        # every failure just a certification this supplier stated but did not evidence?
         passed = status in (QualificationStatus.CLEARED.value,
                             QualificationStatus.UNVERIFIED.value)
-        reason = ("it did not clear the quality checks"
-                  if status == QualificationStatus.NOT_CLEARED.value
-                  else "it has no certification on file")
+        reason = "it has no certification on file"
+        if not passed and qualification is not None:
+            failed = [c for c in qualification.checks if c.required and not c.passed]
+            claimed_only = bool(failed) and all(
+                c.kind == "certification" and c.status == ClaimStatus.CLAIMED.value
+                for c in failed)
+            if claimed_only:
+                passed = True
+            else:
+                blockers = sorted({c.name for c in failed
+                                   if not (c.kind == "certification"
+                                           and c.status == ClaimStatus.CLAIMED.value)})
+                reason = ("it did not clear the quality checks (%s)" % ", ".join(blockers)
+                          if blockers else "it did not clear the quality checks")
     if not passed:
         failures.append(BarResult(supplier_id, name, "qualification", reason,
                                   qualification.failing_evidence_ids() if qualification else []))

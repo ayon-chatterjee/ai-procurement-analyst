@@ -3,29 +3,18 @@ from __future__ import annotations
 
 import streamlit as st
 
-from rfq_copilot.award_models import AwardStatus
-from rfq_copilot.schema import RFQStatus, RFQSummary
+from rfq_copilot import labels
+from rfq_copilot.schema import RFQSummary
 from . import state
 from .theme import badge, esc
 
-STATUS_BADGE = {
-    RFQStatus.DRAFT: ("status-not", "Draft"),
-    RFQStatus.IN_PROGRESS: ("status-not", "Not ready"),
-    RFQStatus.READY: ("status-ready", "Ready to send"),
-    RFQStatus.SUPPLIER_READY: ("status-sent", "Supplier-ready"),
-}
+#: Keyed by the enum value so it is the same table the rest of the app reads. The list
+#: used to say "Draft" where every other screen said "Not ready" for the same RFQ.
+STATUS_BADGE = labels.RFQ_STATUS
 
 #: The award, when there is one, in the same vocabulary the award screen uses. Deliberately
 #: one badge and no controls: this list reopens work, it does not manage awards.
-AWARD_BADGE = {
-    AwardStatus.DRAFT.value: ("edited", "Award in progress"),
-    AwardStatus.REVIEWED.value: ("recommended", "Award reviewed"),
-    AwardStatus.APPROVED.value: ("status-ready", "Award approved"),
-    AwardStatus.READY_TO_EXECUTE.value: ("status-ready", "Messages ready"),
-    AwardStatus.SUPPLIER_NOTIFIED.value: ("status-sent", "Suppliers notified"),
-    AwardStatus.ORDER_HANDOFF.value: ("status-sent", "Order handed off"),
-    AwardStatus.COMPLETED.value: ("status-sent", "Award completed"),
-}
+AWARD_BADGE = labels.AWARD_STATUS_IN_LIST
 
 
 def render() -> None:
@@ -53,7 +42,7 @@ def render() -> None:
 
 
 def _row(svc, r: RFQSummary, is_current: bool, award_status: str = None) -> None:
-    kind, label = STATUS_BADGE.get(r.status, ("status-not", r.status.value))
+    kind, label = labels.label_for(STATUS_BADGE, r.status.value, "status-not")
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns([5, 2.2, 1.5, 1.5])
         with c1:

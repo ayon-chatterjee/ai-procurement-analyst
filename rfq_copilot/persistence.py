@@ -78,6 +78,14 @@ DDL = [
         note TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS rfq_invitations (
+        rfq_id TEXT NOT NULL REFERENCES rfqs(id) ON DELETE CASCADE,
+        supplier_id TEXT NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'invited',
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (rfq_id, supplier_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS supplier_responses (
         id TEXT PRIMARY KEY,
         rfq_id TEXT NOT NULL REFERENCES rfqs(id) ON DELETE CASCADE,
@@ -396,6 +404,11 @@ class RFQRepository:
             c.execute("DELETE FROM rfqs WHERE id = ?", (rfq_id,))
 
     # -- messages -------------------------------------------------------------
+    def delete_messages_for(self, rfq_id: str) -> None:
+        """Clear a transcript. Only the demo seeder uses this: the app appends."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE rfq_id = ?", (rfq_id,))
+
     def add_message(self, m: Message) -> None:
         with self._conn() as c:
             c.execute(
@@ -753,6 +766,28 @@ class SupplierRepository:
         with self._conn() as c:
             r = c.execute("SELECT * FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
         return Supplier.from_dict(dict(r)) if r else None
+
+    # -- invitations ----------------------------------------------------------
+    # `suppliers` is a global directory with no rfq_id, which is right — the same firm
+    # quotes on many RFQs. But "who was asked" is per RFQ, and reading it from the
+    # directory once put a supplier who never heard of an RFQ into its comparison as a
+    # missing quote. This table is that missing edge.
+    def invite(self, rfq_id: str, supplier_id: str, status: str = "invited", note: str = "") -> None:
+        with self._conn() as c:
+            c.execute("""INSERT INTO rfq_invitations(rfq_id, supplier_id, status, note, created_at)
+                         VALUES(?,?,?,?,?)
+                         ON CONFLICT(rfq_id, supplier_id) DO UPDATE SET
+                           status=excluded.status, note=excluded.note""",
+                      (rfq_id, supplier_id, status, note, utc_now()))
+
+    def list_invited(self, rfq_id: str) -> List[Any]:
+        """Suppliers asked to quote on this RFQ, whether or not they replied."""
+        from .supplier_models import Supplier
+        with self._conn() as c:
+            rows = c.execute("""SELECT s.* FROM suppliers s
+                                JOIN rfq_invitations i ON i.supplier_id = s.id
+                                WHERE i.rfq_id = ? ORDER BY s.name""", (rfq_id,)).fetchall()
+        return [Supplier.from_dict(dict(r)) for r in rows]
 
     # -- responses ------------------------------------------------------------
     def save_bundle(self, bundle) -> None:

@@ -12,6 +12,7 @@ itself, and the DocumentExtractor never has an opinion about prices.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 from dataclasses import dataclass
@@ -138,8 +139,12 @@ class SupplierExtractor:
         audit.extend(notes)
         bundle.questionnaire = answers + sg.missing_questionnaire_items(answers, rfq)
 
+        # Which documents are the quotation itself: a certificate claim cannot be proved
+        # by the very file that makes it, so the guard needs to know which those are.
+        quote_docs = {evidence[e].document_id for q in quotes for e in q.evidence_ids
+                      if evidence.get(e) and evidence[e].document_id}
         bundle.certifications = [
-            sg.guard_certification(c, documents, evidence)
+            sg.guard_certification(c, documents, evidence, quote_docs)
             for c in self._build_certifications(response, data, documents, evidence, ceiling)]
         bundle.questions = self._build_questions(response, data, documents, evidence)
         conflicts = sg.record_conflicts(data.get("conflicts") or [], response.id, documents, evidence)
@@ -284,7 +289,7 @@ class SupplierExtractor:
                 payment_terms=shared["payment_terms"],
                 quote_validity_text=shared["validity_text"],
                 quote_validity_is_conditional=shared["validity_conditional"],
-                discount=shared["discount"],
+                discount=copy.deepcopy(shared["discount_template"]),
                 value_source=ValueSource.SUPPLIER_STATED,
                 confidence=_num(raw.get("confidence")),
                 evidence_ids=[e for e in (ev_id, shared["moq_evidence"]) if e],
@@ -320,6 +325,9 @@ class SupplierExtractor:
             evidence_ids=[e for e in (disc_ev,) if e])
         return {
             "currency": str(terms.get("currency") or "").strip().upper(),
+            # every quote gets its own copy: apply_discount writes the outcome onto the
+            # object, and one shared instance would make a per-line correction leak
+            "discount_template": discount,
             "quoted_unit": "",
             "moq": _num(terms.get("minimum_order_quantity")),
             "moq_unit": str(terms.get("moq_unit") or ""),
@@ -329,7 +337,6 @@ class SupplierExtractor:
             "delivery_terms": str(terms.get("delivery_terms") or ""),
             "validity_text": str(terms.get("quote_validity_text") or ""),
             "validity_conditional": bool(terms.get("quote_validity_is_conditional")),
-            "discount": discount,
         }
 
     def _build_questionnaire(self, response: SupplierResponse, data: Dict[str, Any],
@@ -344,7 +351,7 @@ class SupplierExtractor:
                 field_key=str(raw.get("field_key") or ""),
                 answer=str(raw.get("answer") or ""),
                 value_source=ValueSource.SUPPLIER_STATED,
-                confidence=min(_num(raw.get("confidence")) or ceiling, ceiling),
+                confidence=sg._cap(_num(raw.get("confidence")), ceiling),
                 evidence_ids=[e for e in (ev_id,) if e]))
         return out
 
@@ -361,7 +368,7 @@ class SupplierExtractor:
                 issuing_body=str(raw.get("issuing_body") or ""),
                 expiry_date=str(raw.get("expiry_date") or ""),
                 document_reference=str(raw.get("document_reference") or ""),
-                confidence=min(_num(raw.get("confidence")) or ceiling, ceiling),
+                confidence=sg._cap(_num(raw.get("confidence")), ceiling),
                 evidence_ids=[e for e in (ev_id,) if e]))
         return out
 

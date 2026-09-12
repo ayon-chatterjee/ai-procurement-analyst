@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from rfq_copilot import labels
 from rfq_copilot.ai_service import AIError
 from rfq_copilot.award_models import (
     AwardStatus, AwardThresholds, CommunicationStatus, NOT_AVAILABLE, NOT_PROVIDED,
@@ -24,8 +25,8 @@ from rfq_copilot.award_prompts import line_table
 from rfq_copilot.award_service import AwardError
 from rfq_copilot.rfq_service import RFQStateError
 
-from . import state
-from .components import render_resume_hint
+from . import errors, state
+from .components import render_no_rfq
 from .theme import badge, esc
 
 #: What the primary button says at each stage. The label is the next thing that happens,
@@ -39,16 +40,9 @@ NEXT_ACTION = {
     AwardStatus.ORDER_HANDOFF.value: ("Close this award", "complete"),
 }
 
-STATUS_BADGE = {
-    AwardStatus.DRAFT.value: ("edited", "draft"),
-    AwardStatus.REVIEWED.value: ("recommended", "reviewed"),
-    AwardStatus.APPROVED.value: ("status-ready", "approved"),
-    AwardStatus.READY_TO_EXECUTE.value: ("status-ready", "ready to execute"),
-    AwardStatus.SUPPLIER_NOTIFIED.value: ("status-sent", "suppliers notified"),
-    AwardStatus.ORDER_HANDOFF.value: ("status-sent", "order handoff"),
-    AwardStatus.COMPLETED.value: ("status-sent", "completed"),
-    AwardStatus.CANCELLED.value: ("na", "cancelled"),
-}
+#: One table, shared with the saved-RFQ list, so an award does not read "ready to execute"
+#: on its own page and "Messages ready" in the list.
+STATUS_BADGE = labels.AWARD_STATUS
 
 
 def render() -> None:
@@ -59,9 +53,8 @@ def render() -> None:
 
     rfq = state.current_rfq()
     if rfq is None:
-        st.markdown('<div class="rfq-kicker">Award &amp; execution</div>'
-                    '<div class="rfq-title">Place the business</div>', unsafe_allow_html=True)
-        render_resume_hint(svc, "aw", lambda rfq_id: (state.set_current(rfq_id), st.rerun()))
+        render_no_rfq(svc, "aw", "Award & execution",
+                      lambda rfq_id: (state.set_current(rfq_id), st.rerun()))
         return
 
     award_svc = state.get_award_service()
@@ -211,8 +204,15 @@ def _thresholds(award, award_svc) -> None:
 # 2 — the decision
 # --------------------------------------------------------------------------- #
 def _decision(award, proposal, award_svc) -> None:
+    overrides = [l for l in award.lines if l.is_override]
     st.markdown('<div class="aw-step">Step 2 · The decision</div>'
-                '<div class="aw-step-title">Who gets each line</div>',
+                '<div class="aw-step-title">What the system proposes, and what you decided</div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="aw-step-sub">Every line starts on a proposal the system '
+                'calculated. <b>Decided by</b> says which — or says <b>You</b>, once you '
+                'have changed it. %s</div>'
+                % ("You have changed %d line%s." % (len(overrides), "" if len(overrides) == 1 else "s")
+                   if overrides else "You have not changed any line yet."),
                 unsafe_allow_html=True)
 
     rows: List[Dict[str, Any]] = []
@@ -222,7 +222,7 @@ def _decision(award, proposal, award_svc) -> None:
             "Line": line.line_item_id,
             "Item": line.line_label or NOT_AVAILABLE,
             "Qty": line.quantity if line.quantity is not None else NOT_AVAILABLE,
-            "Pick": line.pick_source.replace("_", " "),
+            "Decided by": _decided_by(line),
             "Supplier": line.supplier_name or "not awarded",
             "Unit price": line.unit_price if line.unit_price is not None else NOT_AVAILABLE,
             "As quoted": line.native_text or NOT_AVAILABLE,
@@ -241,6 +241,21 @@ def _decision(award, proposal, award_svc) -> None:
 
     if award.editable:
         _change_line(award, proposal, award_svc)
+
+
+#: The one column that answers "is this a recommendation or my decision?". It was
+#: previously the raw `pick_source` value — "best value", "buyer override" — which names
+#: the mechanism rather than the author.
+DECIDED_BY = {
+    PickSource.CHEAPEST.value: "System · cheapest",
+    PickSource.BEST_VALUE.value: "System · best value",
+    PickSource.BUYER_OVERRIDE.value: "You",
+    PickSource.NONE.value: "No award",
+}
+
+
+def _decided_by(line) -> str:
+    return DECIDED_BY.get(line.pick_source, line.pick_source.replace("_", " "))
 
 
 def _why(line, entry) -> str:
@@ -407,6 +422,8 @@ def _execute(award, report, award_svc) -> None:
         st.info("This award was cancelled: %s" % award.cancelled_reason)
         return
 
+    _pending_line(award, award_svc)
+
     label, action = NEXT_ACTION.get(award.status, (None, None))
     if label and action:
         blocked = bool(report.blocking) and action in ("approve",)
@@ -447,6 +464,45 @@ def _execute(award, report, award_svc) -> None:
                 st.rerun()
 
 
+def _pending_line(award, award_svc) -> None:
+    """What is still outstanding, at every status.
+
+    At READY_TO_EXECUTE the primary button disappears — the next move is per-supplier,
+    inside the message cards below — and the screen said nothing about what remained. A
+    buyer reading it had no way to tell "finished" from "waiting on me".
+    """
+    status = award.status
+    if status in (AwardStatus.DRAFT.value, AwardStatus.REVIEWED.value):
+        st.caption("Nothing has been committed yet. Approving fixes the lines above; "
+                   "the messages and the order handoff come after that.")
+        return
+    if status == AwardStatus.CANCELLED.value:
+        return
+
+    try:
+        comms = award_svc.communications(award.id)
+        handoffs = award_svc.handoffs(award.id)
+    except AwardError:
+        return
+    unsent = [c for c in comms if c.status != CommunicationStatus.SENT.value]
+    bits = []
+    if status == AwardStatus.APPROVED.value:
+        bits.append("Lines are fixed. No supplier has been told anything yet.")
+    if comms:
+        bits.append("%d of %d supplier message%s recorded as sent."
+                    % (len(comms) - len(unsent), len(comms),
+                       "" if len(comms) == 1 else "s"))
+    if unsent:
+        bits.append("Still to send: %s." % ", ".join(c.supplier_name for c in unsent))
+    if status in (AwardStatus.SUPPLIER_NOTIFIED.value,) and not handoffs:
+        bits.append("The order handoff has not been generated.")
+    if handoffs:
+        bits.append("%d order handoff%s generated."
+                    % (len(handoffs), "" if len(handoffs) == 1 else "s"))
+    if bits:
+        st.caption(" ".join(bits))
+
+
 def _communications(award, award_svc) -> None:
     comms = award_svc.communications(award.id)
     if not comms:
@@ -481,16 +537,17 @@ def _communications(award, award_svc) -> None:
                                 unsafe_allow_html=True)
 
             if comm.was_edited and not comm.sendable:
-                st.error("Your wording could not be verified against this award (%s)%s. "
+                st.error("Your wording could not be verified against this award: %s%s. "
                          "This message cannot be recorded as sent until it is corrected."
-                         % (comm.edit_status,
+                         % (labels.describe_guard_status(comm.edit_status),
                             ", and it names %s" % ", ".join(comm.edit_leaks)
                             if comm.edit_leaks else ""),
                          icon=":material/block:")
 
             if comm.guard_status.startswith("rejected"):
-                st.warning("The written draft could not be verified against the award (%s), "
-                           "so the standard letter is shown instead." % comm.guard_status,
+                st.warning("The written draft could not be verified against the award — %s — "
+                           "so the standard letter is shown instead."
+                           % labels.describe_guard_status(comm.guard_status),
                            icon=":material/info:")
 
             body = st.text_area("Message", value=comm.text, height=260, disabled=sent,
@@ -638,9 +695,6 @@ def _process_pending() -> None:
     svc = state.get_award_service()
     kind = action.get("type")
 
-    def fail(e: Exception, label: str) -> None:
-        st.session_state[state.K_AW_ERROR] = str(e)
-
     try:
         if kind == "start":
             award = svc.start(action["rfq_id"])
@@ -667,8 +721,9 @@ def _process_pending() -> None:
                 state.flash("Your wording saved and checked against the award. "
                             "The award is unchanged.")
             else:
-                state.flash("Your wording was saved, but it does not match the award (%s). "
-                            "It cannot be sent until you correct it." % comm.edit_status,
+                state.flash("Your wording was saved, but it does not match the award: %s. "
+                            "It cannot be sent until you correct it."
+                            % labels.describe_guard_status(comm.edit_status),
                             "warning")
         elif kind == "send":
             comm = svc.record_sent(action["comm_id"])
@@ -684,9 +739,9 @@ def _process_pending() -> None:
             svc.cancel(action["award_id"], action.get("reason", ""))
             state.flash("Award cancelled. The history is intact.", "info")
     except AwardError as e:
-        fail(e, "award")
+        st.session_state[state.K_AW_ERROR] = errors.message_for(e, "completing that step")
     except AIError as e:
         st.session_state[state.K_AW_ERROR] = e.user_message
     except Exception as e:                          # pragma: no cover - last resort
-        st.session_state[state.K_AW_ERROR] = "That could not be completed: %s" % str(e)[:200]
+        st.session_state[state.K_AW_ERROR] = errors.message_for(e, "completing that step")
     st.rerun()

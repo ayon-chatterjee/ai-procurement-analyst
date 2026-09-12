@@ -553,6 +553,15 @@ class SupplierResponse:
         )
 
 
+def unresolved_conflicts(quote: "SupplierQuote") -> List[Dict[str, Any]]:
+    """The contradictions on a quote that nobody has settled yet.
+
+    A resolution records which stated value applies. It never edits or deletes the other
+    side: the buyer decided, and the evidence for both readings stays queryable.
+    """
+    return [c for c in (quote.conflicts or []) if not (c.get("resolution") or {}).get("value")]
+
+
 @dataclass
 class ResponseBundle:
     """A response with everything extracted from it, for services and the UI to pass around."""
@@ -573,7 +582,10 @@ class ResponseBundle:
         counts = {
             "unmatched": len([q for q in self.quotes if q.match_status in (MatchStatus.UNMATCHED, MatchStatus.CONFLICT)]),
             "probable_matches": len([q for q in self.quotes if q.match_status == MatchStatus.PROBABLE_MATCH]),
-            "conflicts": len([q for q in self.quotes if q.status == QuoteStatus.CONFLICT]) +
+            # A contradiction the buyer has settled is no longer open. Both stated values
+            # and their evidence stay on the quote; what changes is that someone decided.
+            "conflicts": len([q for q in self.quotes
+                              if q.status == QuoteStatus.CONFLICT and unresolved_conflicts(q)]) +
                          len([q for q in self.questionnaire if q.status == ClaimStatus.CONFLICT]),
             "unresolved_prices": len([q for q in self.quotes if q.normalization_status == NormalizationStatus.UNRESOLVED]),
             "unverified_claims": len([c for c in self.certifications if c.status == ClaimStatus.CLAIMED]),

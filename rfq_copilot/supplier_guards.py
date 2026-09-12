@@ -13,7 +13,7 @@ unforgiving:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .guards import norm_text, similarity
 from .schema import RFQ
@@ -24,6 +24,16 @@ from .supplier_models import (
 
 #: How much of an evidence span must appear in the document before we call it verified.
 EVIDENCE_THRESHOLD = 0.72
+
+
+def _cap(confidence: Optional[float], ceiling: float) -> float:
+    """Lower a confidence to a ceiling without inventing one.
+
+    `min(confidence or 1.0, ceiling)` reads a stated 0.0 as missing and raises it to the
+    ceiling — the one direction that matters, since it turns a worthless value into a
+    confident one.
+    """
+    return ceiling if confidence is None else min(float(confidence), ceiling)
 
 
 def _squash(text: str) -> str:
@@ -155,7 +165,7 @@ def guard_quote(quote: SupplierQuote, evidence: Dict[str, Evidence], confidence_
     has_evidence = any(evidence.get(e) and evidence[e].verified for e in quote.evidence_ids)
     if quote.has_price and not has_evidence:
         quote.status = QuoteStatus.NEEDS_REVIEW
-        quote.confidence = min(quote.confidence or 1.0, 0.4)
+        quote.confidence = _cap(quote.confidence, 0.4)
         note = "The quoted price could not be traced back to the document text."
         if note not in quote.issues:
             quote.issues.append(note)
@@ -218,7 +228,7 @@ def guard_no_invented_lines(quotes: List[SupplierQuote], documents: List[SourceD
             if note not in q.issues:
                 q.issues.append(note)
             q.status = QuoteStatus.NEEDS_REVIEW
-            q.confidence = min(q.confidence or 1.0, 0.3)
+            q.confidence = _cap(q.confidence, 0.3)
             notes.append("%s: %s" % (q.supplier_line_label, note))
     return notes
 
@@ -241,30 +251,81 @@ def canonical_cert_name(raw: str) -> str:
     return (raw or "").strip()
 
 
+#: The number inside a standard's name — "ISO 9001:2015" -> "9001". A certificate document
+#: usually prints the number even when it words the name differently.
+_CERT_NUMBER = re.compile(r"\b(\d{4,5})\b")
+
+
+def _supports_certificate(doc: SourceDocument, cert: Certification) -> bool:
+    """Does this document actually evidence *this* certificate?
+
+    Holding a file whose name resembles what the supplier pointed at is not enough. A
+    quotation that says "certificate attached" would otherwise verify its own claim.
+    """
+    text = _squash(doc.raw_text or "")
+    if not text:
+        return False
+    name = _squash(cert.name or cert.raw_name)
+    if name and name in text:
+        return True
+    number = _squash(cert.certificate_number)
+    if number and len(number) >= 5 and number in text:
+        return True
+    digits = _CERT_NUMBER.search(cert.name or cert.raw_name or "")
+    return bool(digits and digits.group(1) in text)
+
+
 def guard_certification(cert: Certification, documents: List[SourceDocument],
-                        evidence: Dict[str, Evidence]) -> Certification:
+                        evidence: Dict[str, Evidence],
+                        quote_document_ids: Optional[Set[str]] = None) -> Certification:
     """A certification is CLAIMED unless a document we actually hold supports it.
 
     Saying "we are ISO 9001 certified" is a claim. Saying a certificate is attached is
     still only a claim unless the attachment is among the documents we received.
+
+    Two things a filename match alone cannot establish, both of which we check:
+
+    * **The document must not be the quotation.** A supplier whose quote says
+      "certificate attached" once had that quote accepted as its own certificate,
+      because the model reported the quote's filename as the attachment. A quotation is
+      the claim; it cannot also be the proof.
+    * **The document must mention the certificate.** A file called `certificates.pdf`
+      that never names the standard evidences nothing.
     """
     cert.name = canonical_cert_name(cert.raw_name or cert.name) or cert.name
     has_evidence = any(evidence.get(e) and evidence[e].verified for e in cert.evidence_ids)
+    quote_docs = quote_document_ids or set()
 
-    held = None
+    held, self_reference = None, None
+    candidates = []
     if cert.document_reference:
         ref = _squash(cert.document_reference)
-        for d in documents:
-            if ref and (ref in _squash(d.filename) or _squash(d.filename) in ref):
-                held = d
-                break
-    if held is None and cert.document_id:
-        held = next((d for d in documents if d.id == cert.document_id), None)
+        candidates += [d for d in documents
+                       if ref and (ref in _squash(d.filename) or _squash(d.filename) in ref)]
+    if cert.document_id:
+        candidates += [d for d in documents if d.id == cert.document_id]
+    for d in candidates:
+        if d.id in quote_docs:
+            self_reference = self_reference or d
+            continue
+        if _supports_certificate(d, cert):
+            held = d
+            break
 
     if held is not None:
         cert.status = ClaimStatus.VERIFIED
         cert.document_id = held.id
         cert.note = "Supported by %s." % held.filename
+    elif self_reference is not None:
+        cert.status = ClaimStatus.CLAIMED
+        cert.document_id = ""
+        cert.note = ("The supplier points to %s, which is their quotation rather than a "
+                     "certificate, so this remains a claim." % self_reference.filename)
+    elif candidates:
+        cert.status = ClaimStatus.CLAIMED
+        cert.document_id = ""
+        cert.note = ("%s was received but does not mention this certificate, so the claim "
+                     "is not evidenced." % candidates[0].filename)
     else:
         cert.status = ClaimStatus.CLAIMED
         if cert.document_reference:
@@ -274,24 +335,62 @@ def guard_certification(cert: Certification, documents: List[SourceDocument],
             cert.note = "Stated by the supplier with no certificate attached."
     if not has_evidence:
         cert.note = (cert.note + " The claim could not be traced to the document text.").strip()
-        cert.confidence = min(cert.confidence or 1.0, 0.4)
+        cert.confidence = _cap(cert.confidence, 0.4)
 
     if cert.expiry_date:
         cert.status = _expiry_status(cert.expiry_date, cert.status)
     return cert
 
 
-_DATE = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
+_DATE_ISO = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
+#: Day-first, the way most of the world writes a certificate expiry.
+_DATE_DMY = re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b")
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+_DATE_MONTH = re.compile(
+    r"\b(?:(\d{1,2})\s+)?([A-Za-z]{3,9})\s+(\d{4})\b")
+
+
+def parse_expiry_date(expiry: str):
+    """A certificate expiry in any of the formats suppliers actually write, or None.
+
+    Returning None matters: reading "31/12/2026" as unparseable once left an expired
+    certificate showing as current, so an unreadable date is reported rather than ignored.
+    """
+    from datetime import date
+    text = (expiry or "").strip()
+    if not text:
+        return None
+    m = _DATE_ISO.search(text)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = _DATE_DMY.search(text)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if day > 12 >= month or day <= 12:      # ambiguous pairs read day-first
+            try:
+                return date(year, month, day)
+            except ValueError:
+                return None
+        return None
+    m = _DATE_MONTH.search(text)
+    if m:
+        month = _MONTHS.get((m.group(2) or "")[:3].lower())
+        if month:
+            try:
+                return date(int(m.group(3)), month, int(m.group(1) or 1))
+            except ValueError:
+                return None
+    return None
 
 
 def _expiry_status(expiry: str, current: ClaimStatus) -> ClaimStatus:
     from datetime import date
-    m = _DATE.search(expiry or "")
-    if not m:
-        return current
-    try:
-        d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError:
+    d = parse_expiry_date(expiry)
+    if d is None:
         return current
     return ClaimStatus.EXPIRED if d < date.today() else current
 
@@ -327,12 +426,13 @@ def guard_questionnaire(answers: List[QuestionnaireResponse], rfq: RFQ,
         if not a.answer.strip():
             a.status = ClaimStatus.MISSING
         elif has_evidence:
-            # an affirmative answer is a claim; only a document makes it verified
-            a.status = ClaimStatus.CLAIMED if _AFFIRMATIVE.search(a.answer) else ClaimStatus.CLAIMED
+            # An answer is a claim whatever it says. Only a document we hold makes anything
+            # verified, and a questionnaire answer is never a document.
+            a.status = ClaimStatus.CLAIMED
         else:
             a.status = ClaimStatus.CLAIMED
             a.note = "Recorded from the supplier's wording; the exact span could not be located."
-            a.confidence = min(a.confidence or 1.0, 0.4)
+            a.confidence = _cap(a.confidence, 0.4)
         kept.append(a)
     return kept, notes
 

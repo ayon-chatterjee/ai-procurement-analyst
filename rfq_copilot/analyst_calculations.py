@@ -219,8 +219,8 @@ def qualification_assumptions(rfq: RFQ, hyp: Hypothetical) -> List[str]:
     else:
         out.append("This RFQ names no required certification, so \"cleared\" means at "
                    "least one certification is document-backed.")
-    out.append("Questionnaire answers count as answered or not answered; Phase 2 never "
-               "marks an answer verified.")
+    out.append("Questionnaire answers count as answered or not answered; an answer a "
+               "supplier wrote is never treated as verified.")
     return out
 
 
@@ -256,12 +256,18 @@ def _is_price_conflict(quote: SupplierQuote) -> bool:
     return any(("price" in t.lower() or "cost" in t.lower()) for t in _conflict_topics(quote))
 
 
-def _describe_conflicts(quote: SupplierQuote) -> str:
+def _describe_conflicts(quote: SupplierQuote, unresolved_only: bool = False) -> str:
     bits = []
     for c in quote.conflicts or []:
+        resolution = (c.get("resolution") or {}).get("value")
+        if resolution and unresolved_only:
+            continue
+        topic = c.get("topic") or "contradiction"
         values = [str(v.get("value")) for v in (c.get("values") or []) if v.get("value")]
-        bits.append("%s: %s" % (c.get("topic") or "contradiction", " vs ".join(values))
-                    if values else (c.get("topic") or "contradiction"))
+        if resolution:
+            bits.append("%s: settled on %s by the buyer" % (topic, resolution))
+        else:
+            bits.append("%s: %s" % (topic, " vs ".join(values)) if values else topic)
     return "; ".join(bits)
 
 
@@ -325,7 +331,7 @@ def price_check(cell: ComparisonCell, ctx: "CalcContext") -> PriceCheck:
                        evidence_ids=list(quote.evidence_ids))
 
     # Included, but the buyer should see these next to the number.
-    if quote.status == QuoteStatus.CONFLICT:
+    if quote.status == QuoteStatus.CONFLICT or _describe_conflicts(quote):
         check.caveats.append("contradiction on %s" % (_describe_conflicts(quote) or "a term"))
     if quote.moq_constraint:
         check.caveats.append("minimum order %s exceeds this line's quantity"
@@ -537,7 +543,8 @@ def _apply_supplier_filter(ctx: CalcContext, f, keep: List[Supplier],
             reason = "based in %s" % (s.country or "an unstated country")
         elif f.field == "eligibility":
             q = ctx.qualifications.get(s.id)
-            verdict = bool(q and q.status in f.values)
+            hit = bool(q and q.status in f.values)
+            verdict = (not hit) if f.op == "not_in" else hit
             reason = "qualification is %s, not %s" % (
                 q.status if q else "unknown", " or ".join(f.values))
         elif f.field == "certification":
@@ -837,8 +844,8 @@ def cheapest_by_line(ctx: CalcContext) -> AnalystResult:
         summary = ("No line has a quote I can compare. Every price was left out for the "
                    "reasons listed below.")
 
-    assumptions = ["A quote counts only when Phase 2 normalised its price basis and the "
-                   "currency is one I can convert.",
+    assumptions = ["A quote counts only when its price basis could be reduced to a "
+                   "single piece and its currency is one I can convert.",
                    "A minimum order above the line's quantity makes a quote unusable at "
                    "that quantity, so it is not counted as cheapest."
                    if not ctx.hyp.ignore_moq_constraints else
@@ -1646,8 +1653,8 @@ def evidence_lookup(ctx: CalcContext) -> AnalystResult:
                 % (name, target.name), ctx.query.intent)
     elif topic in _TERMS_WITHOUT_SPANS:
         value_text = _terms_text(bundle, _TERMS_WITHOUT_SPANS[topic]) or "not stated"
-        warnings.append("Phase 2 did not record where this term appeared in the document, "
-                        "so I can show the wording it extracted but not a location.")
+        warnings.append("Where this term appeared in the document was not recorded, so "
+                        "I can show the supplier's wording but not where to find it.")
 
     refs = _evidence_refs(ctx, sid, ids, topic, target.line)
     evidence.extend(refs)

@@ -180,8 +180,12 @@ FILTER_RULES: Dict[str, FilterRule] = {
         ["has_verified", "has_claimed", "lacks"], SUPPLIER_SCOPE, "text", 1, 10),
     FilterField.QUESTIONNAIRE.value: _rule(
         ["answered", "missing"], SUPPLIER_SCOPE, "text", 1, 10),
+    # "is" and "in" mean the same thing here — the calculation asks whether the supplier's
+    # qualification is one of the listed values either way. Allowing only "is" refused
+    # "only among suppliers who cleared QA" whenever the model reached for the plural
+    # phrasing, which is the more natural one for a list.
     FilterField.ELIGIBILITY.value: _rule(
-        ["is"], SUPPLIER_SCOPE, "enum", 1, 4, ELIGIBILITY_VALUES),
+        ["is", "in", "not_in"], SUPPLIER_SCOPE, "enum", 1, 4, ELIGIBILITY_VALUES),
     FilterField.LEAD_TIME_DAYS.value: _rule(["lte", "gte"], SUPPLIER_SCOPE, "number", 1, 1),
     FilterField.UNIT_PRICE.value: _rule(["lte", "gte"], CELL_SCOPE, "number", 1, 1),
     FilterField.MOQ.value: _rule(["fits", "exceeds"], CELL_SCOPE, "none", 0, 0),
