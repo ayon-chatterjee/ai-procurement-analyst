@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, FrozenSet, List, Optional
@@ -668,39 +669,47 @@ class AnalystResult:
     def numbers_shown(self) -> List[float]:
         """Every figure this result puts on screen. The explanation guard checks the
         model's narration against exactly this set."""
-        found: List[float] = []
+        return numbers_in([
+            self.rows, self.metrics, self.summary, self.rate_provenance,
+            [e.reason for e in self.exclusions], self.warnings, self.assumptions,
+            self.calculation_notes,
+        ])
 
-        def take(v: Any) -> None:
-            if isinstance(v, bool) or v is None:
-                return
-            if isinstance(v, (int, float)):
-                found.append(float(v))
-            elif isinstance(v, str):
-                import re
-                # "LINE-017" holds the number 17, not minus 17: only read a leading "-"
-                # as a sign when it actually starts a number.
-                for m in re.findall(r"(?<![\w.])-?\d[\d,]*\.?\d*", v):
-                    try:
-                        found.append(float(m.replace(",", "")))
-                    except ValueError:
-                        pass
-            elif isinstance(v, dict):
-                for x in v.values():
-                    take(x)
-            elif isinstance(v, (list, tuple)):
-                for x in v:
-                    take(x)
 
-        take(self.rows)
-        take(self.metrics)
-        take(self.summary)
-        take(self.rate_provenance)
-        take([e.reason for e in self.exclusions])
-        take(self.warnings)
-        take(self.assumptions)
-        take(self.calculation_notes)
-        return found
+#: A "-" only starts a number when nothing word-like precedes it: "LINE-017" holds the
+#: number 17, not minus 17. Getting this wrong made a correct explanation look invented.
+_NUMBER = re.compile(r"(?<![\w.])-?\d[\d,]*\.?\d*")
 
+
+def numbers_in(value: Any) -> List[float]:
+    """Every number reachable inside a value, walking dicts, lists and strings.
+
+    Shared so that a guard checking model prose against data reads figures exactly the
+    way the data does; two implementations would eventually disagree and the disagreement
+    would look like the model inventing something.
+    """
+    found: List[float] = []
+
+    def take(v: Any) -> None:
+        if isinstance(v, bool) or v is None:
+            return
+        if isinstance(v, (int, float)):
+            found.append(float(v))
+        elif isinstance(v, str):
+            for m in _NUMBER.findall(v):
+                try:
+                    found.append(float(m.replace(",", "")))
+                except ValueError:
+                    pass
+        elif isinstance(v, dict):
+            for x in v.values():
+                take(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                take(x)
+
+    take(value)
+    return found
 
 # --------------------------------------------------------------------------- #
 # Conversation and audit

@@ -125,7 +125,7 @@ def _process_pending(sup) -> None:
 
 
 def _header(rfq, sup) -> None:
-    c1, c2, c3 = st.columns([6, 1.7, 1.6])
+    c1, c2, c3, c4 = st.columns([5, 1.7, 1.5, 1.6])
     with c1:
         st.markdown('<div class="rfq-kicker">Quotes &amp; comparison</div><div class="rfq-title">%s</div>'
                     % esc(rfq.title or rfq.product), unsafe_allow_html=True)
@@ -138,6 +138,13 @@ def _header(rfq, sup) -> None:
             state.set_current(rfq.id)
             state.go("analyst")
     with c3:
+        # The analyst explains; the award decides. Keeping them separate buttons is the
+        # same boundary `analyst_guards._AWARD_LANGUAGE` states in code.
+        if sup.has_responses(rfq.id) and st.button("Take a decision", use_container_width=True,
+                                                   key="take_decision"):
+            state.set_current(rfq.id)
+            state.go("award")
+    with c4:
         if sup.has_responses(rfq.id) and st.button("Re-run extraction", use_container_width=True, key="rerun_all"):
             state.queue_quotes({"type": "extract", "rfq_id": rfq.id, "only_pending": False})
             st.rerun()

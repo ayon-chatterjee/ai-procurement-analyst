@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .schema import AICallRecord, Message, RFQ, RFQStatus, RFQSummary, rfq_from_json, rfq_to_json, utc_now
 
@@ -190,6 +190,106 @@ DDL = [
         created_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS ix_analyst_queries_rfq ON analyst_queries(rfq_id, created_at)",
+    # Phase 5. The two thresholds are columns rather than payload because they are decision
+    # inputs: they are re-read on every re-seed, they appear in an assumption the buyer can
+    # argue with, and "which awards were taken with the certification bar relaxed" has to
+    # be answerable.
+    """CREATE TABLE IF NOT EXISTS awards (
+        id TEXT PRIMARY KEY,
+        rfq_id TEXT NOT NULL REFERENCES rfqs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'draft',
+        currency TEXT,
+        max_lead_time_days REAL,
+        require_document_backed_certification INTEGER NOT NULL DEFAULT 1,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        awarded_line_count INTEGER NOT NULL DEFAULT 0,
+        supplier_count INTEGER NOT NULL DEFAULT 0,
+        grand_total REAL,
+        totals_complete INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        approved_at TEXT,
+        notified_at TEXT,
+        completed_at TEXT,
+        payload TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_awards_rfq ON awards(rfq_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_awards_status ON awards(status)",
+    # UNIQUE(award_id, line_item_id) makes duplicate allocation unrepresentable rather
+    # than merely validated against.
+    """CREATE TABLE IF NOT EXISTS award_lines (
+        id TEXT PRIMARY KEY,
+        award_id TEXT NOT NULL REFERENCES awards(id) ON DELETE CASCADE,
+        line_item_id TEXT NOT NULL,
+        supplier_id TEXT,
+        quote_id TEXT,
+        response_id TEXT,
+        pick_source TEXT NOT NULL DEFAULT 'none',
+        unit_price REAL,
+        native_unit_price REAL,
+        native_currency TEXT NOT NULL DEFAULT '',
+        quantity REAL,
+        extended REAL,
+        override_reason TEXT NOT NULL DEFAULT '',
+        decided_at TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        UNIQUE(award_id, line_item_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_award_lines_award ON award_lines(award_id, line_item_id)",
+    # `body` always holds the model's draft; `edited_body` holds the buyer's. Keeping both
+    # is what lets the UI say "edited by you" and show what it was before.
+    """CREATE TABLE IF NOT EXISTS award_communications (
+        id TEXT PRIMARY KEY,
+        award_id TEXT NOT NULL REFERENCES awards(id) ON DELETE CASCADE,
+        supplier_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        subject TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        edited_body TEXT NOT NULL DEFAULT '',
+        guard_status TEXT NOT NULL DEFAULT '',
+        generated_by TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        prompt_version TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        sent_at TEXT,
+        payload TEXT NOT NULL,
+        UNIQUE(award_id, supplier_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_award_comms_award ON award_communications(award_id)",
+    # The handoff snapshots supplier name and contact into its payload: a document of
+    # record must not silently re-render when a contact changes next month.
+    """CREATE TABLE IF NOT EXISTS order_handoffs (
+        id TEXT PRIMARY KEY,
+        award_id TEXT NOT NULL REFERENCES awards(id) ON DELETE CASCADE,
+        supplier_id TEXT NOT NULL,
+        reference TEXT NOT NULL DEFAULT '',
+        currency TEXT NOT NULL DEFAULT '',
+        subtotal REAL,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        UNIQUE(award_id, supplier_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_order_handoffs_award ON order_handoffs(award_id)",
+    # Append-only. `seq` is assigned inside the writing transaction so ordering survives
+    # identical timestamps.
+    """CREATE TABLE IF NOT EXISTS award_events (
+        id TEXT PRIMARY KEY,
+        award_id TEXT NOT NULL REFERENCES awards(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'buyer',
+        subject_type TEXT NOT NULL DEFAULT 'award',
+        subject_id TEXT NOT NULL DEFAULT '',
+        from_state TEXT NOT NULL DEFAULT '',
+        to_state TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        previous TEXT NOT NULL DEFAULT '{}',
+        detail TEXT NOT NULL DEFAULT '{}'
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_award_events_award ON award_events(award_id, seq)",
 ]
 
 
@@ -404,6 +504,217 @@ class AnalystRepository:
     def delete_for(self, rfq_id: str) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM analyst_queries WHERE rfq_id = ?", (rfq_id,))
+
+
+class AwardRepository:
+    """Phase 5's store: the decision, what was said about it, and what happened next.
+
+    Two departures from `AnalystRepository`, both deliberate:
+
+    * `save_award` sweeps and rewrites the award's lines, but never its communications or
+      its events. Deleting those would orphan the id a recorded event points at, and an
+      audit trail with a hole in it is not an audit trail.
+    * `add_event` is **not** best-effort. Losing an analyst audit row costs an answer its
+      provenance; losing an award audit row costs the decision its defensibility, so the
+      exception propagates and rolls back the change it was describing.
+    """
+
+    def __init__(self, repo: "RFQRepository"):
+        self.repo = repo
+        self._conn = repo._conn
+
+    # -- awards ---------------------------------------------------------------
+    def save_award(self, award) -> None:
+        payload = json.dumps(award.to_dict(), sort_keys=True)
+        totals = award.to_dict().get("totals") or {}
+        with self._conn() as c:
+            c.execute("""INSERT INTO awards(id, rfq_id, status, currency, max_lead_time_days,
+                             require_document_backed_certification, line_count, awarded_line_count,
+                             supplier_count, grand_total, totals_complete, created_at, decided_at,
+                             approved_at, notified_at, completed_at, payload)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(id) DO UPDATE SET
+                             status=excluded.status, currency=excluded.currency,
+                             max_lead_time_days=excluded.max_lead_time_days,
+                             require_document_backed_certification=excluded.require_document_backed_certification,
+                             line_count=excluded.line_count,
+                             awarded_line_count=excluded.awarded_line_count,
+                             supplier_count=excluded.supplier_count,
+                             grand_total=excluded.grand_total,
+                             totals_complete=excluded.totals_complete,
+                             decided_at=excluded.decided_at, approved_at=excluded.approved_at,
+                             notified_at=excluded.notified_at, completed_at=excluded.completed_at,
+                             payload=excluded.payload""",
+                      (award.id, award.rfq_id, award.status, award.currency,
+                       award.thresholds.max_lead_time_days,
+                       1 if award.thresholds.require_document_backed_certification else 0,
+                       len(award.lines), len(award.awarded_lines), len(award.supplier_ids),
+                       totals.get("grand_total"), 1 if totals.get("complete") else 0,
+                       award.created_at, award.decided_at or None, award.approved_at or None,
+                       award.notified_at or None, award.completed_at or None, payload))
+            c.execute("DELETE FROM award_lines WHERE award_id = ?", (award.id,))
+            for line in award.lines:
+                c.execute("""INSERT INTO award_lines(id, award_id, line_item_id, supplier_id,
+                                 quote_id, response_id, pick_source, unit_price, native_unit_price,
+                                 native_currency, quantity, extended, override_reason, decided_at,
+                                 payload)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          (line.id, award.id, line.line_item_id, line.supplier_id,
+                           line.quote_id, line.response_id, line.pick_source, line.unit_price,
+                           line.native_unit_price, line.native_currency, line.quantity,
+                           line.extended, line.override_reason, line.decided_at,
+                           json.dumps(line.to_dict(), sort_keys=True)))
+
+    def get_award(self, award_id: str):
+        from .award_models import Award, AwardLine
+        with self._conn() as c:
+            row = c.execute("SELECT payload FROM awards WHERE id = ?", (award_id,)).fetchone()
+            if row is None:
+                return None
+            award = Award.from_dict(json.loads(row["payload"]))
+            lines = c.execute(
+                "SELECT payload FROM award_lines WHERE award_id = ? ORDER BY line_item_id",
+                (award_id,)).fetchall()
+        award.lines = [AwardLine.from_dict(json.loads(r["payload"])) for r in lines]
+        return award
+
+    def list_awards(self, rfq_id: str) -> List[Any]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id FROM awards WHERE rfq_id = ? ORDER BY created_at DESC, rowid DESC",
+                (rfq_id,)).fetchall()
+        return [self.get_award(r["id"]) for r in rows]
+
+    def latest_award(self, rfq_id: str):
+        """The award in play.
+
+        A closed award — cancelled or completed — stays in the record and keeps its
+        history, but never blocks a replacement. `completed` has no outgoing transition, so
+        treating it as current would mean an RFQ could be awarded exactly once, forever.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT id FROM awards WHERE rfq_id = ? AND status NOT IN ('cancelled',
+                   'completed') ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (rfq_id,)).fetchone()
+        return self.get_award(row["id"]) if row else None
+
+    def last_closed_award(self, rfq_id: str):
+        """The most recent finished award, so the screen can still show what happened."""
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT id FROM awards WHERE rfq_id = ? AND status IN ('cancelled',
+                   'completed') ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (rfq_id,)).fetchone()
+        return self.get_award(row["id"]) if row else None
+
+    def award_status_for(self, rfq_id: str) -> Optional[str]:
+        """The status worth showing beside the RFQ in a listing.
+
+        The live award if there is one, otherwise a completed one — finishing an award
+        should not make it vanish from the list. A cancelled award shows nothing: it is a
+        decision that was abandoned, and a badge for it would be noise.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT status FROM awards WHERE rfq_id = ? AND status != 'cancelled'
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""", (rfq_id,)).fetchone()
+        return row["status"] if row else None
+
+    def award_statuses(self) -> Dict[str, str]:
+        """Every RFQ's most recent award status in one query, for the saved-RFQ list.
+
+        Written as a sweep rather than a call per row because the list page renders every
+        saved RFQ, and a status badge is not worth a query each. Ordered oldest first so
+        the newest award wins the key. Follows `award_status_for`: cancelled awards are
+        left out, completed ones are not.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT rfq_id, status FROM awards WHERE status != 'cancelled'
+                   ORDER BY created_at ASC, rowid ASC""").fetchall()
+        return {r["rfq_id"]: r["status"] for r in rows}
+
+    # -- communications -------------------------------------------------------
+    def save_communication(self, comm) -> None:
+        with self._conn() as c:
+            c.execute("""INSERT INTO award_communications(id, award_id, supplier_id, status,
+                             subject, body, edited_body, guard_status, generated_by, model,
+                             prompt_version, duration_ms, created_at, sent_at, payload)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(id) DO UPDATE SET
+                             status=excluded.status, subject=excluded.subject,
+                             body=excluded.body, edited_body=excluded.edited_body,
+                             guard_status=excluded.guard_status,
+                             generated_by=excluded.generated_by, model=excluded.model,
+                             prompt_version=excluded.prompt_version,
+                             duration_ms=excluded.duration_ms, sent_at=excluded.sent_at,
+                             payload=excluded.payload""",
+                      (comm.id, comm.award_id, comm.supplier_id, comm.status, comm.subject,
+                       comm.body, comm.edited_body, comm.guard_status, comm.generated_by,
+                       comm.model, comm.prompt_version, comm.duration_ms, comm.created_at,
+                       comm.sent_at or None, json.dumps(comm.to_dict(), sort_keys=True)))
+
+    def get_communication(self, comm_id: str):
+        from .award_models import SupplierCommunication
+        with self._conn() as c:
+            row = c.execute("SELECT payload FROM award_communications WHERE id = ?",
+                            (comm_id,)).fetchone()
+        return SupplierCommunication.from_dict(json.loads(row["payload"])) if row else None
+
+    def list_communications(self, award_id: str) -> List[Any]:
+        from .award_models import SupplierCommunication
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT payload FROM award_communications WHERE award_id = ? ORDER BY created_at",
+                (award_id,)).fetchall()
+        return [SupplierCommunication.from_dict(json.loads(r["payload"])) for r in rows]
+
+    # -- handoffs -------------------------------------------------------------
+    def save_handoff(self, handoff) -> None:
+        with self._conn() as c:
+            c.execute("""INSERT INTO order_handoffs(id, award_id, supplier_id, reference,
+                             currency, subtotal, line_count, created_at, payload)
+                         VALUES(?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(award_id, supplier_id) DO UPDATE SET
+                             reference=excluded.reference, currency=excluded.currency,
+                             subtotal=excluded.subtotal, line_count=excluded.line_count,
+                             payload=excluded.payload""",
+                      (handoff.id, handoff.award_id, handoff.supplier_id, handoff.reference,
+                       handoff.currency, handoff.subtotal, len(handoff.lines),
+                       handoff.generated_at, json.dumps(handoff.to_dict(), sort_keys=True)))
+
+    def list_handoffs(self, award_id: str) -> List[Any]:
+        from .award_models import OrderHandoff
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT payload FROM order_handoffs WHERE award_id = ? ORDER BY created_at",
+                (award_id,)).fetchall()
+        return [OrderHandoff.from_dict(json.loads(r["payload"])) for r in rows]
+
+    # -- audit ----------------------------------------------------------------
+    def add_event(self, event) -> None:
+        """Deliberately not best-effort: see the class docstring."""
+        with self._conn() as c:
+            row = c.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM award_events "
+                            "WHERE award_id = ?", (event.award_id,)).fetchone()
+            event.seq = int(row["n"])
+            c.execute("""INSERT INTO award_events(id, award_id, seq, event_type, at, actor,
+                             subject_type, subject_id, from_state, to_state, summary,
+                             previous, detail)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (event.id, event.award_id, event.seq, event.event_type, event.at,
+                       event.actor, event.subject_type, event.subject_id, event.from_state,
+                       event.to_state, event.summary,
+                       json.dumps(event.previous, sort_keys=True, default=str),
+                       json.dumps(event.detail, sort_keys=True, default=str)))
+
+    def list_events(self, award_id: str) -> List[Any]:
+        from .award_models import ExecutionEvent
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM award_events WHERE award_id = ? ORDER BY seq",
+                             (award_id,)).fetchall()
+        return [ExecutionEvent.from_dict(dict(r)) for r in rows]
 
 
 class SupplierRepository:

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui import (page_analyst, page_copilot, page_playground, page_quotes, page_review,
-                page_saved, state)
+from ui import (page_analyst, page_award, page_copilot, page_playground, page_quotes,
+                page_review, page_saved, state)
 from ui.theme import inject_css
 
 st.set_page_config(page_title="AI Procurement Analyst", page_icon="📦", layout="wide", initial_sidebar_state="expanded")
@@ -22,9 +22,12 @@ playground = st.Page(page_playground.render, title="Quotation Extraction Playgro
                      icon=":material/science:", url_path="playground")
 analyst = st.Page(page_analyst.render, title="Procurement Analyst",
                   icon=":material/query_stats:", url_path="analyst")
+award = st.Page(page_award.render, title="Award & Execution",
+                icon=":material/gavel:", url_path="award")
 saved = st.Page(page_saved.render, title="Saved RFQs", icon=":material/folder_open:", url_path="saved")
 state.PAGES.update({"copilot": copilot, "review": review, "quotes": quotes,
-                    "analyst": analyst, "playground": playground, "saved": saved})
+                    "analyst": analyst, "award": award, "playground": playground,
+                    "saved": saved})
 
 with st.sidebar:
     st.markdown("### AI Procurement Analyst")
@@ -43,4 +46,5 @@ with st.sidebar:
     st.checkbox("Show diagnostics", key=state.K_DIAGNOSTICS,
                 help="AI call log and guard decisions on the Review and Quotes pages. Off by default.")
 
-st.navigation([copilot, review, quotes, analyst, playground, saved], position="sidebar").run()
+st.navigation([copilot, review, quotes, analyst, award, playground, saved],
+              position="sidebar").run()

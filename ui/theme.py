@@ -84,6 +84,24 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .an-kind { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
   color: var(--muted); font-weight: 700; margin: .9rem 0 .3rem 0; }
 .an-empty { color: var(--muted); font-size: .92rem; }
+/* Award & execution */
+.aw-step { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  font-weight: 700; margin: 1.6rem 0 .1rem 0; }
+.aw-step-title { font-size: 1.12rem; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }
+.aw-step-sub { font-size: .88rem; color: var(--muted); margin: .1rem 0 .7rem 0; }
+.aw-total { font-size: 1.6rem; font-weight: 700; color: var(--ink); line-height: 1.2; }
+.aw-total-sub { font-size: .84rem; color: var(--muted); }
+.aw-delta { background: #F0F9FF; border-left: 3px solid var(--brand); padding: .6rem .8rem;
+  border-radius: 6px; font-size: .92rem; color: var(--ink); }
+.aw-block { background: #FEF2F2; border-left: 3px solid #DC2626; padding: .5rem .75rem;
+  border-radius: 6px; font-size: .88rem; color: #991B1B; margin-bottom: .35rem; }
+.aw-empty { background: #F8FAFC; border-left: 3px solid var(--line); padding: .5rem .75rem;
+  border-radius: 6px; font-size: .86rem; color: var(--muted); }
+.aw-why { font-size: .84rem; color: var(--muted); }
+.aw-sim { font-size: .8rem; color: #92400E; background: #FFF7ED; padding: .35rem .6rem;
+  border-radius: 6px; display: inline-block; }
+.aw-event { font-size: .86rem; color: var(--ink); margin: .15rem 0; }
+.aw-event-at { font-size: .74rem; color: var(--muted); }
 .rfq-muted, .rfq-muted * { color: #94A3B8 !important; }
 .rfq-muted div[data-testid="stExpander"] details { border-color: var(--line); background: transparent; }
 </style>

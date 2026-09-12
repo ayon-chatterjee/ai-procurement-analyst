@@ -1,6 +1,6 @@
 # Test inventory
 
-351 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
+503 tests across 16 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -19,7 +19,10 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 29 |
 | Analyst service & conversation (Phase 3) | 27 |
-| **Total** | **351** |
+| Award seeding, bars & totals (Phase 5) | 53 |
+| Supplier communication guards (Phase 5) | 40 |
+| Award lifecycle, execution & audit (Phase 5) | 59 |
+| **Total** | **503** |
 
 
 ## AI boundary (Claude CLI)
@@ -679,3 +682,230 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 **Suggested Question** (1)
 
 - Every suggestion answers without a model call
+
+
+## Award seeding, bars & totals (Phase 5)
+
+`tests/test_award_calculations.py`
+
+**Award Seeding** (11)
+
+- A line where nobody clears has no best value and says why
+- A price that cannot be normalised is never a candidate
+- A proposal is never asked to write anything
+- A quote whose minimum order is too high is never a candidate
+- A tie is broken by name the way the analyst breaks it
+- An unconfirmed line match is never a candidate
+- Best value is a price not a score
+- Best value is the cheapest quote that clears the bars
+- The cheapest comparable quote is seeded on every line
+- The two coincide when the cheapest already clears
+- When they differ the line says why in one sentence
+
+**Basket Delta** (3)
+
+- The delta says what the extra costs
+- The two are equal when the cheapest already clears
+- There is no delta when best value cannot cover every line
+
+**Review Item Scope** (1)
+
+- An unplaceable quote from an awarded supplier warns rather than blocks
+
+**Stress Shaped** (4)
+
+- Most lines have no best value under the strict bar
+- Relaxing the bar fills every line
+- That is reported as a fact not an error
+- The silent supplier is never a candidate
+
+**Threshold** (9)
+
+- A conditional quote validity fails the firm bar
+- A contradicted lead time fails the bar and names both values
+- A lead time above the limit fails the bar
+- A supplier with no readable lead time fails a stated limit
+- No lead time limit admits a supplier that never stated one
+- Relaxing the bar never admits a failed certification
+- Relaxing the bar says so as an assumption
+- Relaxing the certification bar admits a stated certification
+- The default bar requires a document backed certification
+
+**Totals** (8)
+
+- A line extends quantity by the unit price
+- A missing price or quantity leaves the line empty never zero
+- A partial total always carries its denominator
+- A single currency supplier keeps its own subtotal
+- A subtotal sums the rounded line figures
+- A total is complete only when every awarded line is priced
+- Currencies are never summed together
+- No total at all when there is no comparison currency
+
+**Validation** (17)
+
+- A clean award is ready to execute
+- A conditional validity warns and never blocks
+- A line the buyer declined is recorded not blocked
+- A line with no price blocks execution
+- A line with no quantity blocks execution
+- A minimum order above the line quantity blocks execution
+- A missing commercial term warns and names the term
+- A response level term is reported once not once per line
+- An award with nothing on it blocks
+- An expired quote blocks and an expiring one warns
+- An override that costs more is noted with its reason
+- An unverified certification warns when the rfq required none
+- Awarding a supplier who never replied blocks execution
+- Every finding names the field it read
+- Mixed currencies warn and block only when no rate exists
+- The same line awarded twice blocks
+- Warnings must be acknowledged before approval
+
+
+## Supplier communication guards (Phase 5)
+
+`tests/test_award_guards.py`
+
+**Assembly** (2)
+
+- A newline the model typed as two characters becomes a newline
+- Unescaping touches whitespace and nothing else
+
+**Communication Guard** (17)
+
+- A commitment the buyer never made is rejected
+- A date nobody stated is rejected
+- A faithful draft is kept
+- A figure that appears in a supplied string is ours not an invention
+- A leak can be named for the buyer
+- A placeholder is rejected
+- A price the award does not hold is rejected
+- A quantity the award does not hold is rejected
+- A term quoted as the supplier wrote it passes
+- A term upgraded beyond the supplier wording is rejected
+- An empty or enormous draft is rejected
+- Another suppliers name is rejected
+- Another suppliers price is rejected as a figure we never supplied
+- Claiming the message was sent is rejected
+- Small counts describing the letter itself are allowed
+- That allowance still cannot admit a rivals price
+- The supplier being written to may of course be named
+
+**Fact Pack** (5)
+
+- The allowance comes from the pack not the award
+- The pack holds one supplier and only one
+- The prompt carries no figure outside the pack
+- The prompt carries this supplier and no other
+- The prompt marks the facts as data
+
+**Fallback Letter** (7)
+
+- It asks about a term rather than inventing one
+- It names no rival
+- It names the supplier the rfq and the line count
+- It passes its own guard
+- It passes the guard when every term is missing
+- It quotes the terms the supplier stated
+- The line count reads as english in the plural too
+
+**Line Table** (2)
+
+- A missing figure is a dash never a zero
+- The table carries the award figures
+
+**Neutralisation** (7)
+
+- A long term is truncated rather than given the whole prompt
+- A supplier cannot close the prompt delimiter
+- A suppressed term is reported so the buyer can look
+- An instruction shaped term is dropped not cleaned up
+- An ordinary commercial term passes through unchanged
+- An unstated term reads not provided
+- Several shapes of instruction are caught
+
+
+## Award lifecycle, execution & audit (Phase 5)
+
+`tests/test_award_service.py`
+
+**Buyer Decision Survives** (4)
+
+- A line still on its seed moves and says what it was
+- An overridden line still learns what the proposals became
+- An override survives a reseed
+- An override survives a threshold change
+
+**Communication** (20)
+
+- A buyers own edit can be checked against the award
+- A completed award does not lock the rfq out of ever awarding again
+- A draft that invents a figure falls back to the standard letter
+- A rejected draft is recorded as an event
+- A supplier instruction in a term is suppressed before the prompt
+- A supplier sees only their own lines
+- An edit is recorded with what it replaced
+- An edit keeps the original draft alongside it
+- An edit that leaks a rival cannot be recorded as sent
+- An edit the award supports is marked sendable
+- An edit the award supports passes the same check
+- Drafting before approval is refused
+- Invalid output is retried once
+- One message is drafted for each awarded supplier
+- Recording a send is clearly a simulation
+- The answer survives the model failing outright
+- The award moves on only when every supplier has been notified
+- The check on an edit survives a reload
+- The override list holds only suppliers with a usable price
+- The prompt never carries another suppliers name or price
+
+**Execution Audit** (6)
+
+- An override records the supplier it replaced
+- Deleting the rfq takes the award and its history with it
+- Events survive a new service instance
+- Every state change records the state it replaced
+- History is never rewritten only added to
+- The whole journey is recorded in order
+
+**Lifecycle** (7)
+
+- A blocking finding prevents approval
+- A warning must be acknowledged before approval
+- An approved award cannot have its lines changed
+- An approved award cannot have its thresholds changed
+- Approval records what the buyer was looking at
+- Cancelling is the only way back and history survives
+- The legal moves are the only moves
+
+**Order Handoff** (8)
+
+- A handoff is generated without a model call
+- An unstated term reads not provided
+- Completing closes the award
+- It is refused before the suppliers are notified
+- It is revalidated at generation not trusted from approval
+- The export carries the lines exactly as shown
+- The handoff carries the award figures
+- The handoff snapshots the supplier contact
+
+**Persistence** (6)
+
+- A completed award still shows in a listing
+- A line cannot be awarded twice at the database
+- An award survives a new service instance
+- Reseeding replaces the lines without touching the events
+- The award status is visible for a listing
+- The proposal itself is never stored
+
+**Seeding And Decision** (8)
+
+- A second award is refused while one is open
+- A supplier with no usable price cannot be awarded a line
+- An override requires a reason
+- Cancelling frees the rfq for a new award
+- Cancelling requires a reason
+- Starting an award seeds every line
+- The buyer can decline a line
+- The buyer can take the cheapest instead

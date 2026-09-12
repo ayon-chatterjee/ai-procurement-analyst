@@ -2027,3 +2027,23 @@ CALCULATIONS: Dict[str, Callable[[CalcContext], AnalystResult]] = {
     Intent.EVIDENCE_LOOKUP.value: evidence_lookup,
     Intent.RFQ_COMPLETENESS.value: rfq_completeness,
 }
+
+
+# --------------------------------------------------------------------------- #
+# Public surface for callers outside the analyst
+#
+# Phase 5's award layer decides against exactly the figures this module computes: the same
+# price rule, the same comparison currency, the same exclusion vocabulary. These aliases
+# exist so it can reuse them by name rather than reaching through underscores — a sibling
+# module depending on a private helper is a refactor away from silently diverging, and two
+# implementations of "is this price comparable" is precisely the drift this app cannot
+# afford.
+# --------------------------------------------------------------------------- #
+scan_prices = _scan
+evidence_refs = _evidence_refs
+terms_text = _terms_text
+lead_time_days = _lead_time_days
+first_priced = _first_priced
+line_label = _line_label
+describe_conflicts = _describe_conflicts
+quantity_text = _quantity_text

@@ -38,6 +38,13 @@ K_AN_HISTORY = "an_conversation"    # [(question, result.to_dict())] for this RF
 K_AN_PENDING = "an_pending_action"
 K_AN_ERROR = "an_error"
 K_AN_RFQ = "an_rfq_id"
+
+# Award & execution (Phase 5). Values avoid every widget key used on that page, for the
+# reason recorded above.
+K_AW_ID = "aw_award_id"
+K_AW_PENDING = "aw_pending_action"
+K_AW_ERROR = "aw_error"
+K_AW_ACK = "aw_acknowledged"
                                    # Deliberately not "pg_run": a widget key of the same
                                    # name would overwrite it with the button's bool.
 
@@ -68,6 +75,14 @@ def get_analyst_service() -> "AnalystService":
 
 
 @st.cache_resource(show_spinner=False)
+def get_award_service() -> "AwardService":
+    """Phase 5 award and execution, over the same repository and Phase 2 comparison."""
+    from rfq_copilot.award_service import AwardService
+    base = get_service()
+    return AwardService(base.ai, base.repo, base.settings, get_supplier_service())
+
+
+@st.cache_resource(show_spinner=False)
 def get_playground_service() -> "PlaygroundService":
     """Quotation Extraction Playground, sharing the same repository and AI service."""
     from rfq_copilot.playground_service import PlaygroundService
@@ -81,6 +96,14 @@ def get_testbench() -> "SupplierTestbench":
     from rfq_copilot.supplier_testbench import SupplierTestbench
     base = get_service()
     return SupplierTestbench(base.ai, base.settings)
+
+
+def queue_award(action: Dict[str, Any]) -> None:
+    st.session_state[K_AW_PENDING] = action
+
+
+def take_pending_award() -> Optional[Dict[str, Any]]:
+    return st.session_state.pop(K_AW_PENDING, None)
 
 
 def queue_analyst(action: Dict[str, Any]) -> None:

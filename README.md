@@ -1,18 +1,23 @@
 # AI Procurement Analyst
 
 A working prototype that takes a buyer from *"I need carton boxes"* to a supplier-ready
-RFQ, reads messy supplier replies into one comparison you can trust, and then lets the
-buyer interrogate that comparison in plain English.
+RFQ, reads messy supplier replies into one comparison you can trust, lets the buyer
+interrogate that comparison in plain English, and carries the decision through to an award
+with a letter for each supplier and a structured order handoff.
 
-Three phases are built:
+Four phases are built:
 
 | Phase | What it does |
 |---|---|
 | **1 · RFQ Copilot** | The buyer describes a need in their own words. The AI identifies the product and category, asks only the questions that materially affect supplier pricing, and produces a structured RFQ with line items, provenance and a readiness score. |
 | **2 · Supplier Response Intelligence** | Five suppliers reply in five different formats. The system reads each document, extracts what was actually written, matches supplier lines to RFQ lines, normalises prices where that is safe, and presents a side-by-side comparison with the evidence still attached. |
 | **3 · Procurement Analyst** | The buyer asks questions — *"who is cheapest for each line?"*, *"only among suppliers who cleared QA"*, *"why was Shenzhen excluded?"* — and gets answers calculated from those same quotes, with the method, the assumptions, what was left out, and the supplier's own words behind every figure. |
+| **5 · Award & Execution** | Every line is seeded with two proposals — the cheapest quote and the cheapest that clears the buyer's quality bars — and the buyer picks, or overrides with a reason. The award is validated, approved, and turned into one letter per supplier and a structured order handoff, with an append-only audit trail behind it. |
 
-Phase 4 (awarding) is **not** built.
+Phase 4 as briefed — a weighted best-value score — is **not** built. Phase 5 needed an
+award decision to execute, so it has a deliberately minimal one: *best value* is the
+cheapest quote that clears explicit, buyer-set bars, never a weighted score. See
+[Phase 4 and the minimal award layer](#phase-4-and-the-minimal-award-layer).
 
 ---
 
@@ -110,6 +115,42 @@ A what-if — *"what if we ignore minimum order quantities?"* — is labelled as
 changes only what is counted. `sqlite3 data/rfq_copilot.db .dump` is byte-identical before
 and after.
 
+### Phase 5 — award it and tell the suppliers
+
+1. From the comparison or the analyst, press **Take a decision**, or open
+   **Award & Execution**. **Start the award** seeds every line.
+2. Each line carries two proposals. *Cheapest* is the lowest valid quote. *Best value* is
+   the cheapest quote that clears the bars you set at the top of the page: a certificate
+   we actually hold, a firm (non-conditional) quote validity, and an optional lead-time
+   limit.
+3. On the strict default, **19 of the 30 lines have no best-value candidate at all** —
+   only one supplier in this dataset holds a document-backed certificate, and it quoted 11
+   lines at 26 days. The screen says so rather than showing an empty column, and offers the
+   relaxation as one click, recorded as an assumption.
+4. Relaxed, with a 22-day lead-time limit, the two baskets are comparable and the trade-off
+   is real: **cheapest USD 41,919.60 against best value USD 42,000.00 — USD 80.40 (0.19%)
+   more, for a 21-day lead time instead of 26.** Both figures are computed in Python.
+5. Override any line to any supplier with a **valid** price on it. A reason is required, and
+   an override survives a re-seed; a line still on its seed is re-seeded and the screen says
+   what it moved from.
+6. **Approve** runs validation. Blocking findings disable the button; warnings must each be
+   ticked, and the list of what you acknowledged is stored on the approval event.
+7. **Prepare supplier messages** makes one call per supplier. Claude writes prose only — it
+   is never given a rival's name, price or ranking, and the schema it fills has no numeric
+   field. The line table under each letter is rendered by the application.
+8. Every draft is checked against that supplier's own facts before you see it. A draft that
+   invents a figure, names another supplier, composes a term or claims to have been sent is
+   **discarded whole** and replaced by a deterministic letter that says exactly as much as
+   the award supports. Your own edits face the same check, and a message that fails it
+   cannot be recorded as sent.
+9. Sending is **simulated and labelled as such** on every screen that mentions it. Nothing
+   leaves the machine; there is no mail connection.
+10. **Generate order handoff** re-validates and produces a structured order per supplier,
+    with CSV and Markdown downloads. No model is involved. A term the supplier never stated
+    reads *Not provided* — never a default.
+11. The **History** popover in the header replays every state change with the state it
+    replaced.
+
 ---
 
 ## Architecture
@@ -127,6 +168,11 @@ UI (Streamlit)
         ├─ analyst_prompts        question → structured query; result → one sentence
         ├─ analyst_guards         resolve names, validate the query, check the sentence
         └─ analyst_calculations   every figure, computed in Python
+  └─ AwardService ───────────► Phase 5: award, communication and handoff
+        ├─ award_calculations     seeding, the bars, totals, the basket delta
+        ├─ award_validation       blocking / warning / info findings, per field
+        ├─ award_guards           neutralise supplier text; verify every draft letter
+        └─ award_prompts          prose-only schema, plus the deterministic letter
                     │
               AIService → ClaudeCLIProvider → claude -p --json-schema
                     │
@@ -173,8 +219,38 @@ What falls out of that split:
 - every exclusion is listed with its reason and, where one exists, its evidence span;
 - a narration containing a figure the result does not support is discarded, and the
   deterministic summary stands alone;
-- the analyst describes which quote is lowest; it never recommends or awards. That is
-  Phase 4.
+- the analyst describes which quote is lowest; it never recommends or awards. That belongs
+  to the award screen, and `analyst_guards._AWARD_LANGUAGE` discards any narration that
+  strays into it.
+
+### The rule the whole of Phase 5 rests on
+
+> **Nothing leaves the building that the award does not already support.**
+
+Claude's entire job in Phase 5 is one call per supplier that writes prose a human reads
+before sending. Seeding, picking, validating, totalling and the handoff are pure Python.
+
+- The fact pack handed to the model holds **one** supplier. There is no field a rival's
+  name or price could occupy, so a leak needs a code change that shows up in review rather
+  than a prompt that drifts.
+- The schema the model fills has **no numeric field**. The line table under the letter is
+  rendered by the application from the award.
+- Every figure in a draft must match one in that supplier's own pack. A rival's price is
+  caught by the same check that catches an invented one — and so is a buyer who pastes one
+  in by hand, which is why an unverified edit cannot be recorded as sent.
+- A date must be one the supplier wrote; a commercial term must be quoted, not composed.
+- A failed draft is **discarded whole, never repaired**. The deterministic letter is
+  already complete and correct, so there is nothing to gain from showing one we cannot
+  stand behind.
+- Supplier-written text is neutralised before it reaches a prompt. A sentence shaped like
+  an instruction is dropped and the buyer is told, rather than quietly sanitised into
+  something plausible.
+- `award_lines` carries `UNIQUE(award_id, line_item_id)`, so awarding one line to two
+  suppliers is unrepresentable rather than merely validated against.
+- `add_event` is deliberately **not** best-effort, unlike the analyst's audit writes:
+  losing an analyst row costs an answer's provenance, losing an award row costs the
+  decision's defensibility, so the exception propagates and rolls back the change it
+  described.
 
 ---
 
@@ -194,6 +270,7 @@ Live checks that use the real model and the real fixtures:
 python3 scripts/smoke.py            # Phase 1: category-specific questions, line items, corrections
 python3 scripts/supplier_smoke.py   # Phase 2: all five formats end to end
 python3 scripts/stress_test.py      # Phase 2 at 30 line items
+python3 scripts/award_smoke.py      # Phase 5: seed, approve, draft, handoff, leak test
 ```
 
 Regenerate the fixtures (they are committed, so this is only needed if you change them):
@@ -210,8 +287,11 @@ python3 scripts/seed_phase2_demo.py   # a 7-line carton RFQ with responses regis
 
 No email of any kind, no SMTP, IMAP, Gmail or Outlook. No supplier portal, no
 authentication, no cloud deployment, no ERP integration. No second AI provider and no
-API-key management. No award workflow and no best-value score: the analyst will tell you
-which quote is lowest and why, and stops short of telling you who to pick.
+API-key management. Recording a message as sent is a simulation, labelled as one wherever
+it appears, and the order handoff is a document you download rather than a purchase order
+submitted anywhere. No payment, invoice matching, goods receipt or logistics tracking. No
+weighted best-value score, no negotiation rounds, no multi-buyer approval chain, and no
+splitting one line's quantity across suppliers.
 
 ## Known limitations
 
@@ -236,10 +316,23 @@ which quote is lowest and why, and stops short of telling you who to pick.
   of those came from returns the extracted wording and says plainly that no location was
   recorded, rather than implying one.
 
-## Phase 4 readiness
+- **A supplier letter takes time**: one model call per supplier, roughly 30–60 seconds
+  each. There is always a deterministic letter, so a slow or failed call is never a dead
+  end.
+- **One supplier per line.** Splitting a line's quantity across two suppliers is
+  unrepresentable by design — the `UNIQUE(award_id, line_item_id)` constraint is what holds
+  that line.
 
-Phase 3 leaves the award decision untouched and gives Phase 4 what it needs to make one:
-a deterministic calculation engine (`rfq_copilot/analyst_calculations.py`) whose functions
-— cheapest by line, coverage, MOQ, lead time, qualification — are pure over the comparison
-dataset and independently testable, plus an audit trail in `analyst_queries` recording the
-structured query behind every answer, not just its prose.
+## Phase 4 and the minimal award layer
+
+Phase 4 as briefed is a weighted best-value score. It is not built, and Phase 5 never reads
+one. What Phase 5 genuinely needed was an award *decision* to execute, so it has the
+smallest honest one: **best value is the cheapest quote that clears explicit bars**, each
+bar set by the buyer on the screen and each failure named. No weights, no composite score,
+nothing to tune until it produces the answer someone already wanted.
+
+The engine a weighted Phase 4 would need is in place either way:
+`rfq_copilot/analyst_calculations.py` is pure over the comparison dataset — cheapest by
+line, coverage, MOQ, lead time, qualification — and `award_calculations.propose_award`
+reuses those same functions rather than reimplementing the price rule, so a scoring layer
+would slot in beside `clears_bars` without a second source of truth.
