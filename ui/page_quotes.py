@@ -23,7 +23,8 @@ from rfq_copilot.supplier_models import (
 )
 from rfq_copilot.supplier_service import CellState
 from . import errors, state
-from .components import render_no_rfq
+from . import previews
+from .components import render_document_preview, render_no_rfq
 from .theme import badge, esc
 
 CELL_BADGE = {
@@ -85,6 +86,29 @@ def _process_pending(sup) -> None:
             state.flash("%d supplier responses received. Run extraction to read them." % len(created))
         except RFQStateError as e:
             st.session_state[state.K_QUOTES_ERROR] = str(e)
+        st.rerun()
+
+    if kind == "simulate":
+        with st.status("Writing supplier quotations for this RFQ…", expanded=True) as status:
+            def on_stage(name, text):
+                st.write(("**%s** — %s" % (name, text)) if name else text)
+            try:
+                created = sup.simulate_responses(action["rfq_id"], action.get("count", 4),
+                                                 on_stage=on_stage)
+                st.write("Reading what they sent…")
+                res = sup.extract_all(action["rfq_id"], on_stage=on_stage, only_pending=True)
+                done, failed = len(res["succeeded"]), len(res["failed"])
+                status.update(label="%d supplier responses written and read" % done,
+                              state="error" if failed else "complete", expanded=False)
+                state.flash("%d sample supplier responses added and read. They are "
+                            "fabricated; everything read from them is not."
+                            % len(created))
+            except AIError as e:
+                status.update(label="Could not write the responses", state="error")
+                st.session_state[state.K_QUOTES_ERROR] = e.user_message
+            except RFQStateError as e:
+                status.update(label="Could not write the responses", state="error")
+                st.session_state[state.K_QUOTES_ERROR] = str(e)
         st.rerun()
 
     if kind == "remove_response":
@@ -195,33 +219,71 @@ def _empty_state(rfq, sup) -> None:
                 "suppliers sent you, or load the built-in demo set.")
     _add_response_form(rfq, key="empty")
 
+    _simulate_panel(rfq)
+
     with st.container(border=True):
-        st.markdown('<div class="pg-label">Or try the demo documents</div>',
+        st.markdown('<div class="pg-label">Or load the five-format demo set</div>',
                     unsafe_allow_html=True)
-        st.caption("Five suppliers answering **a request for corrugated carton boxes**, in "
-                   "five formats — a spreadsheet, a PDF, a Word document, a plain email and "
-                   "a photographed quotation — plus one revision and one supplier who never "
-                   "replies. Nothing is sent or received; the files are read from disk.")
+        st.caption("Five suppliers answering **a request for corrugated carton boxes** — a "
+                   "spreadsheet, a PDF, a Word document, a plain email and a photographed "
+                   "quotation — plus one revision and one supplier who never replies. These "
+                   "are committed files, so they are the way to see the document readers "
+                   "work on real formats rather than on text.")
         if not _demo_suits(rfq):
             # The failure this prevents: carton quotations attached to an RFQ for pneumatic
             # cylinders, every cell reading "not quoted", and the product looking broken
             # when it was in fact refusing to match a carton to a cylinder.
-            st.warning("This RFQ is for **%s**, and the demo documents quote carton boxes. "
+            st.warning("This RFQ is for **%s**, and these documents quote carton boxes. "
                        "They will load and read correctly, but nothing in them matches these "
-                       "line items, so every price will show as *not quoted*. Upload your own "
-                       "supplier replies above instead."
-                       % (rfq.product or "something else"), icon=":material/info:")
+                       "line items, so every price will show as *not quoted*. Use one of the "
+                       "options above instead." % (rfq.product or "something else"),
+                       icon=":material/info:")
         if st.button("Load the carton-box demo set", key="seed_btn",
                      type="primary" if _demo_suits(rfq) else "secondary"):
             state.queue_quotes({"type": "seed", "rfq_id": rfq.id})
             st.rerun()
 
 
-def _add_response_form(rfq, key: str) -> None:
-    """Attach the documents a supplier actually sent.
+def _simulate_panel(rfq) -> None:
+    """Supplier replies written for whatever this RFQ is actually about.
 
-    Until this existed the only route to quotes was the demo fixture set, so an RFQ a buyer
-    had just built by hand had no way to receive a real reply.
+    A new RFQ arrives with nobody having answered it, which is correct and unhelpful:
+    there is nothing to look at until real quotes come back. This writes a few, for this
+    product and these line items, so the comparison, the analyst and the award have
+    something to work on within a couple of minutes of building an RFQ.
+    """
+    with st.container(border=True):
+        st.markdown('<div class="pg-label">Or generate sample supplier responses</div>',
+                    unsafe_allow_html=True)
+        st.caption("Quotations written for **%s** and these %d line items: several "
+                   "suppliers, disagreeing on price, minimum order, lead time and currency, "
+                   "with at least one who does not quote everything. The documents are "
+                   "fabricated — everything that happens to them afterwards is the real "
+                   "pipeline." % (rfq.product or "this RFQ", len(rfq.line_items)))
+        c1, c2 = st.columns([1.2, 4])
+        with c1:
+            count = st.number_input("How many", min_value=2, max_value=6, value=4, step=1,
+                                    key="sim_count", label_visibility="collapsed")
+        with c2:
+            if st.button("Generate %d supplier responses" % int(count), type="primary",
+                         key="sim_btn", disabled=not rfq.line_items):
+                state.queue_quotes({"type": "simulate", "rfq_id": rfq.id,
+                                    "count": int(count)})
+                st.rerun()
+        if not rfq.line_items:
+            st.caption("This RFQ has no line items yet, so there is nothing to quote. Add "
+                       "them in the Copilot or on the Review page first.")
+        else:
+            st.caption("Writing them takes about a minute; reading them takes about another "
+                       "minute each, four at a time.")
+
+
+def _add_response_form(rfq, key: str) -> None:
+    """Attach what a supplier actually sent — pasted text, files, or both.
+
+    Most supplier replies are an email, so text is the first field rather than an
+    afterthought: requiring a file to exist before a quotation could be recorded meant a
+    buyer had to save an email to disk before the system would look at it.
     """
     with st.container(border=True):
         st.markdown('<div class="pg-label">Add a supplier response</div>',
@@ -234,24 +296,33 @@ def _add_response_form(rfq, key: str) -> None:
             with c2:
                 email = st.text_input("Contact email (optional)", key="ar_mail_%s" % key,
                                       placeholder="sales@supplier.example")
+            body = st.text_area(
+                "What they wrote", key="ar_body_%s" % key, height=150,
+                placeholder="Paste their email or quotation here — prices, terms, "
+                            "whatever they sent. Untidy is fine; that is the point.")
             files = st.file_uploader(
-                "Their quotation", type=ACCEPTED, accept_multiple_files=True,
+                "Attachments (optional)", type=ACCEPTED, accept_multiple_files=True,
                 key="ar_files_%s" % key,
-                help="Whatever they sent: a spreadsheet, a PDF, a Word file, the email "
-                     "itself, or a photograph of a printed quote. Several files are fine.")
+                help="A quotation spreadsheet, a PDF, a Word file, or a photograph of a "
+                     "printed quote. Several files are fine, with or without text above.")
             submitted = st.form_submit_button("Add and read this response", type="primary")
         if submitted:
+            payload = [(f.name, f.getvalue()) for f in (files or [])]
+            if (body or "").strip():
+                # The email itself is a document, and is read by the same reader.
+                payload.insert(0, ("%s_email.txt" % (name or "supplier").strip().lower()
+                                   .replace(" ", "_")[:40], body.strip().encode("utf-8")))
             if not (name or "").strip():
                 st.warning("Give the supplier a name so their quote can be attributed.")
-            elif not files:
-                st.warning("Attach at least one document from %s." % name.strip())
+            elif not payload:
+                st.warning("Paste what %s wrote, or attach their quotation."
+                           % (name.strip() or "the supplier"))
             else:
                 state.queue_quotes({
                     "type": "add_response", "rfq_id": rfq.id, "name": name.strip(),
-                    "email": (email or "").strip(),
-                    "files": [(f.name, f.getvalue()) for f in files]})
+                    "email": (email or "").strip(), "files": payload})
                 st.rerun()
-        st.caption("The file is read the same way the demo documents are: prices, terms and "
+        st.caption("Text and attachments are read the same way: prices, terms and "
                    "certifications are extracted, matched to your line items, and every "
                    "figure keeps a link back to the words it came from.")
 
@@ -546,10 +617,21 @@ def _suppliers(sup, rfq) -> None:
 
             with st.expander("Documents and uncertainties", expanded=False):
                 for d in bundle.documents:
-                    st.markdown("- **%s** (%s) — %s" % (esc(d.filename), esc(d.media_type),
-                                                        esc(d.extraction_method or d.extraction_status.value)))
-                    if d.extraction_note:
-                        st.caption(d.extraction_note)
+                    dc1, dc2 = st.columns([5, 1.4])
+                    with dc1:
+                        st.markdown("**%s** (%s) — %s"
+                                    % (esc(d.filename), esc(previews.type_label(d.media_type)),
+                                       esc(d.extraction_method or d.extraction_status.value)))
+                        if d.extraction_note:
+                            st.caption(d.extraction_note)
+                    with dc2:
+                        # The same "what did they actually send?" the extraction bench
+                        # offers. Reading a price without being able to open the document
+                        # behind it asks the buyer to take the number on trust.
+                        with st.popover("Open", use_container_width=True):
+                            render_document_preview(d.filename, d.path, d.media_type,
+                                                    d.raw_text, d.extraction_method,
+                                                    d.byte_size)
                 for u in r.uncertainties:
                     st.markdown("- %s" % esc(u))
                 if st.session_state.get(state.K_DIAGNOSTICS):

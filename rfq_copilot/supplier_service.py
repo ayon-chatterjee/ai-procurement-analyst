@@ -33,6 +33,12 @@ from .supplier_models import (
     unresolved_conflicts,
 )
 
+def _slug(name: str) -> str:
+    """A filename-safe form of a supplier's name."""
+    out = "".join(c if c.isalnum() else "_" for c in (name or "supplier").lower())
+    return out.strip("_")[:48] or "supplier"
+
+
 FIXTURE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fixtures", "suppliers")
 
 #: The demo cast. Fabricated; nothing is ever sent anywhere.
@@ -245,6 +251,68 @@ class SupplierService:
         silent.status = SupplierStatus.NO_RESPONSE
         self.store.save_supplier(silent)
         self.store.invite(rfq_id, silent.id, "no_response")
+        return created
+
+    def simulate_responses(self, rfq_id: str, count: int = 4,
+                           on_stage: Optional[Callable[[str, str], None]] = None
+                           ) -> List[SupplierResponse]:
+        """Write plausible supplier quotations for *this* RFQ, and register them.
+
+        The committed fixture set quotes corrugated carton boxes. It is the right demo for
+        a carton RFQ and useless for any other, which left a buyer who had just built an
+        RFQ for pneumatic cylinders with no way to see the product work on their own
+        requirement. This generates replies to the requirement in front of you.
+
+        The documents are fabricated and the screen says so. What happens to them
+        afterwards is not simulated at all: they are registered and read by the same
+        extraction, matching and normalisation every real supplier document goes through,
+        so what you are looking at is the real pipeline on made-up post.
+        """
+        rfq = self.repo.get_rfq(rfq_id)
+        if rfq is None:
+            raise RFQStateError("RFQ %s not found" % rfq_id)
+        if not rfq.line_items:
+            raise RFQStateError(
+                "This RFQ has no line items yet, so there is nothing for a supplier to "
+                "quote. Add them in the Copilot or on the Review page first.")
+        count = max(1, min(int(count or 4), 6))
+
+        say = on_stage or (lambda a, b: None)
+        say("", "Writing %d supplier quotations for %s…" % (count, rfq.product or "this RFQ"))
+        # The prompt and schema live with the extraction bench, which needed exactly this
+        # first; they describe supplier documents, not the bench.
+        from .playground_prompts import (
+            SIMULATION_PROMPT_VERSION, SIMULATION_SYSTEM_PROMPT, build_simulation_prompt,
+        )
+        from .playground_schemas import SIMULATED_RESPONSES_SCHEMA
+
+        items = [{"name": li.product, "description": li.description, "quantity": li.quantity,
+                  "unit": li.unit,
+                  "specifications": [{"name": sp.name, "value": sp.value, "unit": sp.unit}
+                                     for sp in li.specifications]}
+                 for li in rfq.line_items]
+        shared = [("%s: %s" % (fv.label, fv.display_value())) for fv in rfq.fields.values()
+                  if fv.is_filled][:12]
+        prompt = build_simulation_prompt(rfq.product, rfq.category, items, shared,
+                                         supplier_count=count)
+        try:
+            res = self.ai.complete_json(prompt, SIMULATED_RESPONSES_SCHEMA,
+                                        SIMULATION_SYSTEM_PROMPT, tier="quality")
+        except AIError as e:
+            raise RFQStateError("Could not write sample responses: %s" % e.user_message)
+
+        created: List[SupplierResponse] = []
+        for raw in (res.data.get("suppliers") or [])[:count]:
+            name = str(raw.get("supplier_name") or "").strip()
+            text = str(raw.get("document_text") or "").strip()
+            if not name or not text:
+                continue
+            say(name, "registering their quotation")
+            created.append(self.add_response(
+                rfq_id, name, [("%s_quotation.txt" % _slug(name), text.encode("utf-8"))],
+                country=str(raw.get("country") or "").strip()))
+        if not created:
+            raise RFQStateError("No usable supplier documents were produced. Try again.")
         return created
 
     def add_response(self, rfq_id: str, supplier_name: str, files: List[Tuple[str, bytes]],

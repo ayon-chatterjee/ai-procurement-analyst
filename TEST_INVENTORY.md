@@ -1,6 +1,6 @@
 # Test inventory
 
-557 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+562 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -15,7 +15,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Schema, fields & UI glue (Phase 1) | 33 |
 | Document reading & supplier guards (Phase 2) | 37 |
 | Price normalisation & line matching (Phase 2) | 30 |
-| Supplier service, comparison & FX (Phase 2) | 41 |
+| Supplier service, comparison & FX (Phase 2) | 46 |
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 31 |
 | Analyst service & conversation (Phase 3) | 27 |
@@ -23,7 +23,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 59 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **557** |
+| **Total** | **562** |
 
 
 ## AI boundary (Claude CLI)
@@ -494,8 +494,9 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - Response type reflects partial coverage
 - The matching call is skipped only when dimensions settle every line
 
-**Own Supplier Response** (7)
+**Own Supplier Response** (8)
 
+- A pasted email is a document like any other
 - A response can be taken back out again
 - A response needs a named supplier and a document
 - A second reply from one supplier supersedes the first
@@ -511,6 +512,13 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 **Revision** (1)
 
 - A later response supersedes the earlier one without deleting it
+
+**Simulated Responses** (4)
+
+- An rfq with no line items is refused with a reason
+- It writes one response per supplier and registers them
+- The documents are kept so the evidence still resolves
+- The prompt describes this rfq and not the carton fixtures
 
 
 ## Analyst calculations (Phase 3)

@@ -450,6 +450,16 @@ class OwnSupplierResponseTest(ServiceHarness):
         self.assertEqual(len(svc.store.list_responses(self.rfq.id)), 2,
                          "the earlier reply is kept, not deleted")
 
+    def test_a_pasted_email_is_a_document_like_any_other(self):
+        """Most replies arrive as an email. Requiring a file first meant a buyer had to
+        save it to disk before the system would look at it."""
+        svc = self._svc()
+        resp = svc.add_response(self.rfq.id, "Acme Cylinders",
+                                [("acme_email.txt", DOC_A.encode("utf-8"))])
+        svc.extract_response(resp.id)
+        cell = svc.build_comparison(self.rfq.id).cell("LINE-001", resp.supplier_id)
+        self.assertEqual(cell.display, "USD 0.42")
+
     def test_a_response_can_be_taken_back_out_again(self):
         """Loading documents onto the wrong RFQ was a one-way door."""
         svc = self._svc()
@@ -487,6 +497,53 @@ class OwnSupplierResponseTest(ServiceHarness):
         svc.add_response(self.rfq.id, "Acme Cylinders", [("q.txt", DOC_A.encode())])
         self.assertNotIn("Acme Cylinders",
                          [s.name for s in svc.build_comparison("rfq_somewhere_else").suppliers])
+
+
+class SimulatedResponsesTest(ServiceHarness):
+    """Sample replies written for whatever the RFQ is actually about.
+
+    The committed fixtures quote carton boxes, which is the right demo for a carton RFQ
+    and useless for any other — so a buyer who had just built an RFQ for something else
+    had no way to see their own requirement work.
+    """
+
+    def _payload(self, n=3):
+        return {"note": "for a demonstration",
+                "suppliers": [{"supplier_name": "Supplier %d" % i, "country": "India",
+                               "style": "email",
+                               "document_text": "Quotation\nLine 1  10 x 10 x 5  2000 pcs  0.4%d\n"
+                                                "MOQ 2000. Lead time 20 days." % i}
+                              for i in range(1, n + 1)]}
+
+    def test_it_writes_one_response_per_supplier_and_registers_them(self):
+        svc, ai = self.build([self._payload(3)])
+        created = svc.simulate_responses(self.rfq.id, count=3)
+        self.assertEqual(len(created), 3)
+        names = {b.supplier.name for b in svc.bundles_for(self.rfq.id)}
+        self.assertEqual(names, {"Supplier 1", "Supplier 2", "Supplier 3"})
+
+    def test_the_prompt_describes_this_rfq_and_not_the_carton_fixtures(self):
+        svc, ai = self.build([self._payload(2)])
+        svc.simulate_responses(self.rfq.id, count=2)
+        prompt = ai.calls[0]["prompt"]
+        self.assertIn(self.rfq.product, prompt)
+        self.assertIn("10 x 10 x 5", prompt, "the real line items must reach the prompt")
+
+    def test_the_documents_are_kept_so_the_evidence_still_resolves(self):
+        svc, _ = self.build([self._payload(1)])
+        created = svc.simulate_responses(self.rfq.id, count=1)
+        doc = svc.store.get_bundle(created[0].id).documents[0]
+        self.assertTrue(os.path.exists(doc.path))
+
+    def test_an_rfq_with_no_line_items_is_refused_with_a_reason(self):
+        from rfq_copilot.rfq_service import RFQStateError
+        svc, _ = self.build([])
+        empty = svc.repo.get_rfq(self.rfq.id)
+        empty.line_items = []
+        svc.repo.save_rfq(empty)
+        with self.assertRaises(RFQStateError) as caught:
+            svc.simulate_responses(self.rfq.id)
+        self.assertIn("nothing for a supplier to quote", str(caught.exception))
 
 
 class ConflictResolutionTest(ServiceHarness):

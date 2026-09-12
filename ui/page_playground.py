@@ -22,6 +22,7 @@ from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_testbench import TestbenchError, TestRun
 from . import previews
 from . import errors, state
+from .components import render_document_preview
 from .theme import badge, esc
 
 #: Declared next to the readers that open them, so a screen cannot offer a format nothing
@@ -396,29 +397,9 @@ def _attachment_card(doc: Dict[str, Any], index: int) -> None:
 
 
 def _attachment_preview(doc: Dict[str, Any], thumb: Optional[str]) -> None:
-    media, path, name = doc.get("media_type", ""), doc.get("path", ""), doc.get("filename", "")
-    st.markdown("**%s**" % esc(name))
-    if media == "image" and path:
-        st.image(path, use_container_width=True)
-    elif thumb:
-        st.image(thumb, use_container_width=True)
-    rows = previews.spreadsheet_rows(path)
-    if rows:
-        st.caption("First rows")
-        st.dataframe(pd.DataFrame(rows[1:], columns=_unique_headers(rows[0])),
-                     hide_index=True, use_container_width=True)
-    st.caption("What the system read from this file (%s)" % esc(doc.get("method", "")))
-    st.code((doc.get("text") or "")[:3000], language=None)
-
-
-def _unique_headers(row: List[str]) -> List[str]:
-    """Spreadsheets often repeat or omit header cells; make them usable as columns."""
-    out, seen = [], {}
-    for i, value in enumerate(row):
-        label = (str(value).strip() or "col %d" % (i + 1))
-        seen[label] = seen.get(label, 0) + 1
-        out.append(label if seen[label] == 1 else "%s (%d)" % (label, seen[label]))
-    return out
+    render_document_preview(doc.get("filename", ""), doc.get("path", ""),
+                            doc.get("media_type", ""), doc.get("text", ""),
+                            doc.get("method", ""), doc.get("bytes", 0))
 
 
 # --------------------------------------------------------------------------- #

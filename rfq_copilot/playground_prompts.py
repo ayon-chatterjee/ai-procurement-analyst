@@ -51,7 +51,7 @@ RULES:
 1. Write each quotation in the style asked for: a table-style quotation, a short email, or a prose letter.
 2. Vary them deliberately. Suppliers disagree on price, minimum order quantity, lead time and payment terms. Use realistic figures for the product and region.
 3. At least one supplier must NOT quote every line item, and should say so.
-4. At least one supplier must price on a basis other than per piece - per 100, per 1000, per kg or per set - and say so plainly.
+4. Most suppliers price per unit, as they would in real life. Exactly ONE should price on another basis and say so plainly - prefer per 100 or per 1000, the usual wholesale alternatives. Use per kg or per set only where the product is genuinely sold that way, and never for more than one supplier: a basis nobody can convert leaves the buyer with no comparison rather than a harder one.
 5. Include commercial terms: MOQ, lead time, payment terms, delivery basis and quote validity. Not every supplier gives all of them.
 6. Mention certifications the way suppliers really do, usually as a claim with no certificate attached.
 7. Quote in a currency that suits the supplier's country. Not every supplier uses the same one.

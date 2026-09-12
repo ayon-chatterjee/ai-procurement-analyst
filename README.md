@@ -91,12 +91,20 @@ open the worked example directly.
 ### Phase 2 — read the supplier replies
 
 1. Open **Quotes & Comparison** with an RFQ open.
-2. For your own RFQ, use **Add a supplier response**: name the supplier and upload what
-   they actually sent — a spreadsheet, a PDF, the email, a photograph of a printed quote.
-   It is registered and read straight away, and can be removed again from the Suppliers
-   tab. The built-in demo documents quote **corrugated carton boxes**, so they only make
-   sense against a carton RFQ; loading them onto anything else reads them correctly and
-   then matches nothing.
+2. For your own RFQ there are two ways to get quotes, both on **Quotes & Comparison**:
+   - **Add a supplier response** — name the supplier, paste what they wrote and/or attach
+     their files. Text and attachments are read the same way. **Open** on any document
+     shows the original beside the text the system read from it, and **Remove** takes a
+     response back out again.
+   - **Generate sample supplier responses** — writes three to six quotations *for this
+     RFQ's own product and line items*: suppliers who disagree on price, minimum order,
+     lead time and currency, one who does not quote everything, one who prices on another
+     basis. The documents are fabricated; everything that happens to them afterwards is
+     the real pipeline. Takes a minute to write and about a minute each to read.
+
+   The built-in fixture set quotes **corrugated carton boxes**, so it only makes sense
+   against a carton RFQ. It is still the way to see the readers work on real formats —
+   xlsx, PDF, Word, a photograph — rather than on text.
 3. Responses are already registered by `scripts/seed_demo.py`. On a carton RFQ without them,
    **Load the carton-box demo set** registers five suppliers, their documents, one revision
    and one supplier who never replies. Nothing is sent or received; files are read from
