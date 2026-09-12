@@ -7,6 +7,7 @@ procurement extractor downstream can cite where a value came from.
 Formats and how each is read:
 
   .xlsx   openpyxl, cell by cell, so evidence can name a real cell like "Sheet1!D7"
+  .csv    stdlib csv, addressed by row and column (.xls is reported unsupported)
   .pdf    a small parser over the page content streams (zlib for FlateDecode).
           Text-layer PDFs only; a scanned PDF yields no text and is reported
           UNSUPPORTED rather than guessed at.
@@ -95,13 +96,64 @@ class TextExtractor(DocumentExtractor):
 
 
 # --------------------------------------------------------------------------- #
+class CsvExtractor(DocumentExtractor):
+    """Comma or tab separated text, addressed by row and column like a sheet."""
+    media_type = "csv"
+
+    def handles(self, path: str) -> bool:
+        return path.lower().endswith((".csv", ".tsv"))
+
+    def extract(self, path: str) -> DocumentContent:
+        import csv as _csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            sample = f.read(4096)
+            f.seek(0)
+            try:
+                dialect = _csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            except _csv.Error:
+                dialect = _csv.excel
+            rows = list(_csv.reader(f, dialect))
+        if not rows:
+            return DocumentContent(media_type="csv", status=ExtractionStatus.UNSUPPORTED,
+                                   note="The file is empty.")
+        blocks, lines = [], []
+        for r_i, row in enumerate(rows, start=1):
+            cells = []
+            for c_i, value in enumerate(row):
+                text = (value or "").strip()
+                if not text:
+                    continue
+                ref = "%s%d" % (_column_letter(c_i), r_i)
+                cells.append("%s=%s" % (ref, text))
+                blocks.append(ExtractedBlock(text=text, location="row %d · cell %s" % (r_i, ref),
+                                             row=r_i, cell=ref))
+            if cells:
+                lines.append("  " + " | ".join(cells))
+        return DocumentContent(text="\n".join(lines), blocks=blocks, media_type="csv",
+                               method="csv row/column read", status=ExtractionStatus.EXTRACTED)
+
+
+def _column_letter(index: int) -> str:
+    letters = ""
+    index += 1
+    while index:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+# --------------------------------------------------------------------------- #
 class XlsxExtractor(DocumentExtractor):
     media_type = "xlsx"
 
     def handles(self, path: str) -> bool:
-        return path.lower().endswith((".xlsx", ".xlsm"))
+        return path.lower().endswith((".xlsx", ".xlsm", ".xls"))
 
     def extract(self, path: str) -> DocumentContent:
+        if path.lower().endswith(".xls"):
+            return DocumentContent(media_type="xls", status=ExtractionStatus.UNSUPPORTED,
+                                   note="Legacy .xls is a different binary format that openpyxl cannot "
+                                        "read. Re-save it as .xlsx or .csv and attach that instead.")
         try:
             from openpyxl import load_workbook
         except ImportError:
@@ -303,7 +355,8 @@ class DocumentExtractorRegistry:
     def __init__(self, settings: Optional[Settings] = None, extractors: Optional[List[DocumentExtractor]] = None):
         settings = settings or Settings.from_env()
         self.extractors = extractors if extractors is not None else [
-            XlsxExtractor(), PdfExtractor(), DocxExtractor(), TextExtractor(), ImageExtractor(settings),
+            XlsxExtractor(), CsvExtractor(), PdfExtractor(), DocxExtractor(), TextExtractor(),
+            ImageExtractor(settings),
         ]
 
     def media_type_for(self, path: str) -> str:

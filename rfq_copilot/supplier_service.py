@@ -171,6 +171,15 @@ class SupplierService:
         self.store.save_supplier(silent)
         return created
 
+    def register_response(self, rfq_id: str, supplier: Supplier, filenames: List[str], folder: str,
+                          received_at: str, is_revision: bool = False) -> SupplierResponse:
+        """Record that a supplier response arrived, without reading it yet.
+
+        Public entry point for callers outside this module (the Requirement Playground
+        registers generated supplier documents this way). Identical to the seeding path.
+        """
+        return self._register(rfq_id, supplier, filenames, folder, received_at, is_revision)
+
     def _register(self, rfq_id: str, supplier: Supplier, filenames: List[str], fixture_dir: str,
                   received_at: str, is_revision: bool = False) -> SupplierResponse:
         response = SupplierResponse(

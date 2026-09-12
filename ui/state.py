@@ -21,6 +21,17 @@ K_DIAGNOSTICS = "show_diagnostics"
 K_PENDING_QUOTES = "pending_quotes_action"
 K_QUOTES_ERROR = "quotes_error"
 K_DISPLAY_CCY = "display_currency"
+# Requirement Playground — held in session only; nothing is persisted until the user
+# chooses to save the extracted requirement as an RFQ.
+K_PG_RESULT = "pg_result"          # buyer-side extraction, for the new-requirement path
+K_PG_SELECTED = "pg_selected"
+K_PG_ERROR = "pg_error"
+K_PG_PENDING = "pg_pending"
+K_PG_RFQ = "pg_rfq_id"             # the RFQ being tested against
+K_PG_LINE = "pg_line_label"        # the chosen line item
+K_PG_RUN = "pg_test_run"           # the current TestRun; throwaway, never persisted.
+                                   # Deliberately not "pg_run": a widget key of the same
+                                   # name would overwrite it with the button's bool.
 
 PAGES: Dict[str, Any] = {}   # filled by app.py: name -> st.Page
 
@@ -38,6 +49,26 @@ def get_supplier_service() -> "SupplierService":
     from rfq_copilot.supplier_service import SupplierService
     base = get_service()
     return SupplierService(base.repo, base.ai, base.settings)
+
+
+@st.cache_resource(show_spinner=False)
+def get_playground_service() -> "PlaygroundService":
+    """Requirement Playground, sharing the same repository and AI service."""
+    from rfq_copilot.playground_service import PlaygroundService
+    base = get_service()
+    return PlaygroundService(base.ai, base.repo, base.settings)
+
+
+@st.cache_resource(show_spinner=False)
+def get_testbench() -> "SupplierTestbench":
+    """Supplier-response test harness, sharing the same AI service as everything else."""
+    from rfq_copilot.supplier_testbench import SupplierTestbench
+    base = get_service()
+    return SupplierTestbench(base.ai, base.settings)
+
+
+def queue_playground(action: Dict[str, Any]) -> None:
+    st.session_state[K_PG_PENDING] = action
 
 
 def queue_quotes(action: Dict[str, Any]) -> None:
