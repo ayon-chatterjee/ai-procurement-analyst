@@ -1,6 +1,6 @@
 # Test inventory
 
-348 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
+351 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -16,10 +16,10 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Document reading & supplier guards (Phase 2) | 30 |
 | Price normalisation & line matching (Phase 2) | 27 |
 | Supplier service, comparison & FX (Phase 2) | 26 |
-| Analyst calculations (Phase 3) | 62 |
+| Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 29 |
 | Analyst service & conversation (Phase 3) | 27 |
-| **Total** | **348** |
+| **Total** | **351** |
 
 
 ## AI boundary (Claude CLI)
@@ -539,6 +539,12 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 
 - A minimum order is compared with the line quantity
 - An unstated minimum order is not assumed to fit
+
+**Qualification Is Always Explained** (3)
+
+- A qa filtered price answer defines what cleared means
+- An unfiltered answer is not cluttered with the definition
+- The lenient what if says what it promoted
 
 **Result Shape** (5)
 

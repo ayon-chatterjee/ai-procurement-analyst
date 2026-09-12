@@ -679,6 +679,14 @@ def _result(ctx: CalcContext, columns: List[str], rows: List[Dict[str, Any]],
     if ctx.currency:
         result.assumptions.insert(0, "Prices are compared in %s, taken from %s."
                                   % (ctx.currency, ctx.currency_reason))
+    # Whenever a qualification rule removed somebody, the answer has to say what that
+    # rule was. Excluding five suppliers on a quality test without defining the test
+    # would be exactly the kind of silent judgement this app exists to avoid.
+    if any(f.field in ("eligibility", "certification", "questionnaire")
+           for f in ctx.query.filters) or ctx.hyp.treat_claimed_as_verified:
+        for line in qualification_assumptions(ctx.rfq, ctx.hyp):
+            if line not in result.assumptions:
+                result.assumptions.append(line)
     return result
 
 

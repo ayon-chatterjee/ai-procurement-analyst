@@ -690,3 +690,37 @@ class SameSourceOfTruthTest(unittest.TestCase):
 def _trimmed(value):
     text = ("%.4f" % value).rstrip("0").rstrip(".")
     return text
+
+
+class QualificationIsAlwaysExplainedTest(unittest.TestCase):
+    """If a quality rule removed somebody, the answer says what the rule was.
+
+    Excluding suppliers on a test the buyer cannot see is the silent judgement this
+    application exists to avoid, so the definition travels with any answer that applied
+    one — not just with the answers about qualification.
+    """
+
+    def setUp(self):
+        self.rfq = carton_rfq(sizes=["10 x 10 x 5"])
+        _, self.good = bundle(self.rfq, "Alpha Cartons", [quote(self.rfq, "LINE-001", 0.42)],
+                              certs=[("ISO 9001", ClaimStatus.VERIFIED)],
+                              answers=[("required_delivery_date", "18 days", ClaimStatus.CLAIMED)])
+        _, self.weak = bundle(self.rfq, "Beta Boxes", [quote(self.rfq, "LINE-001", 0.30)],
+                              certs=[("ISO 9001", ClaimStatus.CLAIMED)],
+                              answers=[("required_delivery_date", "20 days", ClaimStatus.CLAIMED)])
+
+    def test_a_qa_filtered_price_answer_defines_what_cleared_means(self):
+        result = run(Intent.CHEAPEST_BY_LINE, self.rfq, [self.good, self.weak],
+                     filters=[Filter("eligibility", "is", ["cleared"])])
+        joined = " ".join(result.assumptions)
+        self.assertIn("document", joined)
+        self.assertIn("claim", joined)
+
+    def test_an_unfiltered_answer_is_not_cluttered_with_the_definition(self):
+        result = run(Intent.CHEAPEST_BY_LINE, self.rfq, [self.good, self.weak])
+        self.assertNotIn("claim", " ".join(result.assumptions))
+
+    def test_the_lenient_what_if_says_what_it_promoted(self):
+        result = run(Intent.CHEAPEST_BY_LINE, self.rfq, [self.good, self.weak],
+                     hypothetical=Hypothetical(treat_claimed_as_verified=True))
+        self.assertTrue(any("counts as if it were verified" in a for a in result.assumptions))
