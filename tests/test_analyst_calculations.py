@@ -21,6 +21,7 @@ from rfq_copilot.fx import RateTable
 from rfq_copilot.supplier_models import (
     ClaimStatus, MatchStatus, PriceBasis, QuoteStatus, ResponseType,
 )
+from rfq_copilot.supplier_service import CellState
 from tests.analyst_helpers import (
     bundle, evidence_row, matrix, quote, query, rate_table, silent,
 )
@@ -630,3 +631,62 @@ class ResultShapeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SameSourceOfTruthTest(unittest.TestCase):
+    """The analyst and the comparison screen read one dataset, so they cannot disagree.
+
+    Every price the analyst reports has to be the figure the comparison cell already
+    holds. If these ever diverge, one of the two screens is lying to the buyer.
+    """
+
+    def setUp(self):
+        self.rfq = carton_rfq(sizes=["10 x 10 x 5", "12 x 10 x 6", "15 x 10 x 8"])
+        _, self.a = bundle(self.rfq, "Alpha Cartons",
+                           [quote(self.rfq, "LINE-001", 0.42),
+                            quote(self.rfq, "LINE-002", 0.55),
+                            quote(self.rfq, "LINE-003", 2.35, basis=PriceBasis.PER_KG)])
+        _, self.b = bundle(self.rfq, "Beta Boxes",
+                           [quote(self.rfq, "LINE-001", 0.39, currency="EUR"),
+                            quote(self.rfq, "LINE-002", 0.60, moq=9000)])
+
+    def test_every_price_the_analyst_reports_is_the_comparison_cell_figure(self):
+        m = matrix(self.rfq, [self.a, self.b], display_currency="USD")
+        q = query(Intent.COMPARE_PRICES, comparison_currency="USD")
+        result = CALCULATIONS[q.intent](build_context(m, q, "USD", "the currency you asked for"))
+        for row in result.rows:
+            for supplier in m.suppliers:
+                shown = str(row[supplier.name]).replace(" †", "")
+                cell = m.cell(row["Line"], supplier.id)
+                if cell.quote is not None and cell.converted is not None:
+                    self.assertEqual(shown, "USD %s" % _trimmed(cell.converted.amount),
+                                     "%s on %s" % (supplier.name, row["Line"]))
+
+    def test_a_cell_the_comparison_calls_unresolved_is_never_given_a_price(self):
+        m = matrix(self.rfq, [self.a, self.b], display_currency="USD")
+        q = query(Intent.CHEAPEST_BY_LINE, comparison_currency="USD")
+        ctx = build_context(m, q, "USD", "the currency you asked for")
+        for line in self.rfq.line_items:
+            for supplier in m.suppliers:
+                cell = m.cell(line.id, supplier.id)
+                if cell.state in (CellState.UNRESOLVED, CellState.NOT_QUOTED,
+                                  CellState.NO_RESPONSE):
+                    self.assertIsNone(price_check(cell, ctx).amount,
+                                      "%s %s is %s on the comparison screen"
+                                      % (supplier.name, line.id, cell.state))
+
+    def test_the_counts_agree_with_the_comparison_summary(self):
+        m = matrix(self.rfq, [self.a, self.b], display_currency="USD")
+        q = query(Intent.SUPPLIER_COVERAGE)
+        result = CALCULATIONS[q.intent](build_context(m, q, "USD", "the currency you asked for"))
+        for row in result.rows:
+            supplier = next(s for s in m.suppliers if s.name == row["Supplier"])
+            priced = sum(1 for line in self.rfq.line_items
+                         if (m.cell(line.id, supplier.id).quote is not None
+                             and m.cell(line.id, supplier.id).quote.has_price))
+            self.assertEqual(row["Priced lines"], priced, row["Supplier"])
+
+
+def _trimmed(value):
+    text = ("%.4f" % value).rstrip("0").rstrip(".")
+    return text

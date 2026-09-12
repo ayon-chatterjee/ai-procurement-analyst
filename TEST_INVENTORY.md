@@ -1,6 +1,6 @@
 # Test inventory
 
-345 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
+348 tests across 13 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -16,10 +16,10 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Document reading & supplier guards (Phase 2) | 30 |
 | Price normalisation & line matching (Phase 2) | 27 |
 | Supplier service, comparison & FX (Phase 2) | 26 |
-| Analyst calculations (Phase 3) | 59 |
+| Analyst calculations (Phase 3) | 62 |
 | Analyst query & explanation guards (Phase 3) | 29 |
 | Analyst service & conversation (Phase 3) | 27 |
-| **Total** | **345** |
+| **Total** | **348** |
 
 
 ## AI boundary (Claude CLI)
@@ -551,6 +551,12 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 **Rfq Completeness** (1)
 
 - The percentage carries its numerator denominator and definition
+
+**Same Source Of Truth** (3)
+
+- A cell the comparison calls unresolved is never given a price
+- Every price the analyst reports is the comparison cell figure
+- The counts agree with the comparison summary
 
 **Unresolved Issues** (2)
 
