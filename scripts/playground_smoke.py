@@ -1,4 +1,4 @@
-"""Requirement Playground smoke test — real model, real files, no stubs.
+"""Quotation Extraction Playground smoke test — real model, real files, no stubs.
 
 Covers the cases a demo will actually hit: plain text, text plus an attachment,
 several line items, requirements that are genuinely missing, and a requirement split

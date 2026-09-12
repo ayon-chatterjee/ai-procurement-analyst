@@ -53,6 +53,25 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .rfq-pending { display:inline-block; background:#FEF3C7; color:#92400E; font-size:.78rem; font-weight:600;
   padding:.14rem .55rem; border-radius:999px; margin:.1rem 0 .4rem 0; }
 .rfq-price { font-size: 1.15rem; font-weight: 700; color: var(--ink); }
+/* Quotation Extraction Playground */
+.pg-section { margin: 1.8rem 0 .9rem 0; padding-bottom: .45rem; border-bottom: 2px solid var(--line); }
+.pg-section-title { font-size: 1.15rem; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }
+.pg-section-sub { font-size: .88rem; color: var(--muted); margin-top: .1rem; }
+.pg-label { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  font-weight: 700; margin-bottom: .35rem; }
+.pg-subject { font-weight: 600; color: var(--ink); margin-bottom: .5rem; }
+.pg-email { font-size: .93rem; line-height: 1.6; color: var(--ink); white-space: pre-wrap; }
+.pg-att-name { font-weight: 600; font-size: .9rem; color: var(--ink); margin-top: .5rem;
+  overflow-wrap: anywhere; }
+.pg-att-meta { font-size: .78rem; color: var(--muted); margin-bottom: .4rem; }
+.pg-thumb-fallback { font-size: 2.6rem; text-align: center; padding: 1.4rem 0; background: #F8FAFC;
+  border-radius: 8px; }
+.pg-span { font-size: .84rem; color: var(--muted); margin: .05rem 0 .1rem 1.6rem;
+  border-left: 2px solid var(--line); padding-left: .5rem; }
+.pg-note { font-size: .82rem; color: #92400E; margin: .05rem 0 .5rem 1.6rem; }
+.pg-missing { color: var(--muted); font-style: italic; }
+.pg-issue-mark { color: #EA580C; font-weight: 700; }
+.pg-issue-subject { color: var(--muted); font-weight: 500; }
 .rfq-muted, .rfq-muted * { color: #94A3B8 !important; }
 .rfq-muted div[data-testid="stExpander"] details { border-color: var(--line); background: transparent; }
 </style>

@@ -175,7 +175,7 @@ class SupplierService:
                           received_at: str, is_revision: bool = False) -> SupplierResponse:
         """Record that a supplier response arrived, without reading it yet.
 
-        Public entry point for callers outside this module (the Requirement Playground
+        Public entry point for callers outside this module (the Quotation Extraction Playground
         registers generated supplier documents this way). Identical to the seeding path.
         """
         return self._register(rfq_id, supplier, filenames, folder, received_at, is_revision)

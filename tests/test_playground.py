@@ -1,4 +1,4 @@
-"""Requirement Playground: extraction, the adapter into an RFQ, and error handling.
+"""Quotation Extraction Playground: extraction, the adapter into an RFQ, and error handling.
 
 The adapter is what matters most here. Once requirements become an RFQ, Phase 1's
 completeness rules and Phase 2's supplier engine apply unchanged, so these tests check

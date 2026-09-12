@@ -241,3 +241,91 @@ class Phase2UntouchedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProvenanceTest(unittest.TestCase):
+    """A span is a claim about what the supplier wrote. Getting one wrong is worse than
+    showing none, because the buyer reads it as the supplier's own words."""
+
+    def _run(self):
+        from rfq_copilot.supplier_testbench import _locate
+        b, rfq, _, _, _ = bench([clean_payload()])
+        run = b.run_test(rfq, "LINE-002", "S", "", CLEAN_REPLY)
+        return run, _locate
+
+    def test_a_shared_number_alone_does_not_make_a_citation(self):
+        run, _locate = self._run()
+        # "30" appears in the reply only inside "Payment 30% advance".
+        span, _ = _locate("30 days from date of issue", run)
+        self.assertEqual(span, "", "a number in common is not evidence of the same term")
+
+    def test_a_reworded_term_still_cites_its_own_sentence(self):
+        run, _locate = self._run()
+        span, where = _locate("18 days from date of order", run)
+        self.assertIn("18 days", span)
+        self.assertEqual(where, "email body")
+
+    def test_a_value_the_supplier_never_wrote_cites_nothing(self):
+        run, _locate = self._run()
+        self.assertEqual(_locate("warranty 24 months", run)[0], "")
+
+    def test_a_value_taken_from_the_rfq_is_not_shown_as_supplier_evidence(self):
+        b, rfq, _, _, _ = bench([clean_payload()])
+        run = b.run_test(rfq, "LINE-002", "S", "", CLEAN_REPLY)
+        spec = run.table.rows[0].cell("specification")
+        self.assertTrue(spec.from_rfq)
+        self.assertFalse(spec.traced)
+        self.assertEqual(spec.span, "", "the supplier did not write the RFQ's own specification")
+
+
+class SegmentTest(unittest.TestCase):
+    """Spans are cut out of the supplier's own text, so the cutting has to be careful:
+    a quotation is mostly unpunctuated rows, and prices contain full stops."""
+
+    def test_a_row_without_punctuation_is_a_span_of_its_own(self):
+        from rfq_copilot.supplier_testbench import _segments
+        text = ("A16=Minimum order quantity | B16=2,000 pcs per size\n"
+                "A20=Quotation validity | B20=30 days from date of issue")
+        segs = _segments(text)
+        self.assertIn("A16=Minimum order quantity | B16=2,000 pcs per size", segs)
+        self.assertIn("A20=Quotation validity | B20=30 days from date of issue", segs)
+
+    def test_a_decimal_price_is_not_cut_in_half(self):
+        from rfq_copilot.supplier_testbench import _segments
+        segs = _segments("A6=1 | C6=2000 | D6=pcs | E6=0.42 | F6=USD")
+        self.assertEqual(segs, ["A6=1 | C6=2000 | D6=pcs | E6=0.42 | F6=USD"])
+
+    def test_a_paragraph_still_splits_into_sentences(self):
+        from rfq_copilot.supplier_testbench import _segments
+        segs = _segments("Prices are FOB Shanghai. Lead time 18 days. Payment 30% advance.")
+        self.assertEqual(len(segs), 3)
+        self.assertEqual(segs[1], "Lead time 18 days.")
+
+
+class MergedIssueTest(unittest.TestCase):
+    """A contradiction in the supplier's own terms is one fact about the response, not one
+    fact per line, and Needs Review has to read as a short list to be worth scanning."""
+
+    def test_one_contradiction_across_lines_is_listed_once(self):
+        from rfq_copilot.supplier_testbench import Issue, _merge_repeats
+        detail = "The supplier gave more than one answer for Unit price."
+        issues = [Issue("conflict", "Contradictory values", "Line %d" % i, detail, i)
+                  for i in range(1, 6)]
+        merged = _merge_repeats(issues)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].row_index, 1, "the first affected line stays the jump target")
+        self.assertIn("Line 1", merged[0].subject)
+        self.assertIn("2 more", merged[0].subject, "the lines it could not name are counted")
+
+    def test_line_specific_issues_are_never_merged(self):
+        from rfq_copilot.supplier_testbench import Issue, _merge_repeats
+        issues = [Issue("missing_price", "Missing price", "Line %d" % i,
+                        "The supplier did not give a unit price for this line.", i)
+                  for i in range(1, 4)]
+        self.assertEqual(len(_merge_repeats(issues)), 3)
+
+    def test_different_contradictions_stay_separate(self):
+        from rfq_copilot.supplier_testbench import Issue, _merge_repeats
+        issues = [Issue("conflict", "Contradictory values", "Line 1", "Two answers for price.", 1),
+                  Issue("conflict", "Contradictory values", "Line 2", "Two answers for MOQ.", 2)]
+        self.assertEqual(len(_merge_repeats(issues)), 2)

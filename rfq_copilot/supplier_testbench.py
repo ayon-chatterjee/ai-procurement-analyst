@@ -74,7 +74,9 @@ class TestRun:
     ai_calls: List[AICallRecord] = field(default_factory=list)
     duration_ms: int = 0
     promoted: bool = False
-    documents: List[Dict[str, Any]] = field(default_factory=list)   # {filename, media_type, text}
+    documents: List[Dict[str, Any]] = field(default_factory=list)   # {filename, media_type, text, path, bytes}
+    table: "ExtractionTable" = field(default_factory=lambda: ExtractionTable())
+    issues: List["Issue"] = field(default_factory=list)
 
     # -- counters for the summary strip ------------------------------------
     @property
@@ -105,6 +107,107 @@ class TestRun:
         for d in self.documents:
             parts.append("### %s\n%s" % (d["filename"], d["text"]))
         return "\n\n".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Presentation model: the same extraction, shaped as a quotation table.
+#
+# Nothing here re-reads a document or re-judges a value. Every cell is a field Phase 2
+# already extracted, carrying the span Phase 2 already recorded.
+# --------------------------------------------------------------------------- #
+@dataclass
+class Cell:
+    """One value in the quotation table, with where it came from."""
+    value: str = ""
+    span: str = ""
+    location: str = ""
+    traced: bool = False
+    deviation: bool = False
+    note: str = ""
+    derived: bool = False        # calculated by us, not stated by the supplier
+    from_rfq: bool = False       # carried over from the buyer's own line, not the supplier
+
+    @property
+    def missing(self) -> bool:
+        return not str(self.value).strip()
+
+    def display(self, placeholder: str = "—") -> str:
+        return placeholder if self.missing else str(self.value)
+
+
+@dataclass
+class Column:
+    key: str
+    label: str
+    core: bool = True            # core columns show even when every row is empty
+    numeric: bool = False
+
+
+@dataclass
+class QuoteRow:
+    index: int
+    quote: Optional[SupplierQuote]
+    label: str                   # what the supplier called it
+    rfq_line_id: Optional[str]
+    cells: Dict[str, Cell] = field(default_factory=dict)
+
+    def cell(self, key: str) -> Cell:
+        return self.cells.get(key, Cell())
+
+
+@dataclass
+class Issue:
+    """One thing worth the buyer's attention, derived from existing Phase 2 records."""
+    kind: str
+    title: str
+    subject: str = ""            # which line item it concerns
+    detail: str = ""
+    row_index: Optional[int] = None
+
+
+#: Questionnaire keys the quotation table already has a column for. An answer restating
+#: one of these would put the same figure on screen twice under two different headings -
+#: a "Quantity" column next to "Qty" - so it is skipped rather than added as an extra.
+COVERED_FIELD_KEYS = {
+    "product", "description", "specification", "specifications",
+    "quantity", "order_quantity", "unit", "uom",
+    "price", "unit_price", "target_price", "line_total", "total_price",
+    "moq", "minimum_order_quantity",
+    "lead_time", "lead_time_days", "delivery_time",
+    "delivery_terms", "incoterms", "delivery_location", "required_delivery_date",
+    "payment_terms", "quote_validity", "validity", "validity_period",
+}
+
+#: Columns backed by fields the Phase 2 data model actually carries.
+BASE_COLUMNS = [
+    Column("product", "Product"),
+    Column("rfq_line", "RFQ line"),
+    Column("specification", "Specification"),
+    Column("quantity", "Qty", numeric=True),
+    Column("unit", "Unit"),
+    Column("unit_price", "Unit price (as quoted)"),
+    Column("per_piece", "Per piece", numeric=True),
+    Column("line_total", "Line total", numeric=True),
+    Column("moq", "MOQ"),
+    Column("lead_time", "Lead time"),
+    Column("delivery", "Delivery"),
+    Column("payment", "Payment terms"),
+    Column("validity", "Quote validity"),
+]
+
+
+@dataclass
+class ExtractionTable:
+    columns: List[Column] = field(default_factory=list)
+    rows: List[QuoteRow] = field(default_factory=list)
+
+    def column(self, key: str) -> Optional[Column]:
+        return next((c for c in self.columns if c.key == key), None)
+
+    def counts(self) -> Dict[str, int]:
+        filled = sum(1 for r in self.rows for c in self.columns if not r.cell(c.key).missing)
+        missing = sum(1 for r in self.rows for c in self.columns if r.cell(c.key).missing)
+        return {"line_items": len(self.rows), "fields": filled, "missing": missing}
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +268,8 @@ class SupplierTestbench:
         for d in outcome.bundle.documents:
             if d.raw_text.strip():
                 run.documents.append({"filename": d.filename, "media_type": d.media_type,
-                                      "text": d.raw_text})
+                                      "text": d.raw_text, "path": d.path,
+                                      "bytes": d.byte_size, "method": d.extraction_method})
             else:
                 run.unreadable.append((d.filename, d.extraction_note or d.extraction_status.value))
 
@@ -307,6 +411,167 @@ class SupplierTestbench:
 
         run.deviations = [("%s: %s" % (r.field, r.note or "needs a look")) for r in run.rows if r.deviation]
         run.unclaimed_figures = _unclaimed_figures(run)
+        run.table = self._build_table(run, rfq)
+        run.issues = self._build_issues(run, rfq)
+
+    # ------------------------------------------------------- quotation table
+    def _build_table(self, run: TestRun, rfq: RFQ) -> "ExtractionTable":
+        """Shape the extracted quotes as a quotation table. No value is recomputed."""
+        bundle = run.bundle
+        ev = bundle.evidence
+        lines_by_id = {li.id: li for li in rfq.line_items}
+        table = ExtractionTable(columns=list(BASE_COLUMNS))
+
+        # Any questionnaire item the supplier addressed becomes an extra column, so a
+        # field this RFQ happens to ask about (warranty, origin, packaging) shows up
+        # without the table needing to know about it in advance.
+        answered = [a for a in bundle.questionnaire
+                    if a.answer and a.field_key and a.status != ClaimStatus.MISSING]
+        used_keys = {c.key for c in table.columns}
+        used_labels = {c.label.strip().lower() for c in table.columns}
+        extras = []
+        for a in answered:
+            if a.field_key in COVERED_FIELD_KEYS:
+                continue          # the table already carries this under its own heading
+            key = "q_" + a.field_key
+            label = _humanise(a.field_key)
+            if key in used_keys or label.strip().lower() in used_labels:
+                continue
+            used_keys.add(key)
+            used_labels.add(label.strip().lower())
+            extras.append((key, a))
+            table.columns.append(Column(key, label, core=False))
+
+        for i, q in enumerate(bundle.quotes, start=1):
+            line = lines_by_id.get(q.line_item_id or "")
+            span, loc, traced = _first_evidence(q.evidence_ids, ev)
+            row = QuoteRow(index=i, quote=q, rfq_line_id=q.line_item_id,
+                           label=q.supplier_line_label or (line.product if line else "line %d" % i))
+
+            row.cells["product"] = Cell(value=row.label, span=span, location=loc, traced=traced)
+            match_note, match_dev = _match_note(q, rfq)
+            row.cells["rfq_line"] = Cell(value=q.line_item_id or "", deviation=match_dev,
+                                         note=match_note, span=span, location=loc, traced=traced)
+            row.cells["specification"] = Cell(
+                value=(line.spec_summary() or line.description) if line else "",
+                from_rfq=bool(line),
+                note="From the RFQ line this quote was matched to." if line else "")
+
+            qty = q.quoted_quantity if q.quoted_quantity else (line.quantity if line else None)
+            own_qty = bool(q.quoted_quantity)
+            row.cells["quantity"] = Cell(
+                value="{:,.0f}".format(qty) if qty else "",
+                span=span if own_qty else "", location=loc if own_qty else "",
+                traced=traced and own_qty, from_rfq=bool(qty) and not own_qty,
+                note="" if own_qty else
+                     ("Taken from the RFQ line; the supplier did not restate it." if qty else ""))
+            own_unit = bool(q.quoted_unit)
+            row.cells["unit"] = Cell(
+                value=q.quoted_unit or (line.unit if line else ""),
+                span=span if own_unit else "", location=loc if own_unit else "",
+                traced=traced and own_unit,
+                from_rfq=not own_unit and bool(line and line.unit),
+                note="" if q.quoted_unit else
+                     ("Taken from the RFQ line; the supplier did not restate it."
+                      if (line and line.unit) else ""))
+
+            price_note, price_dev = _quote_note(q)
+            row.cells["unit_price"] = Cell(
+                value=q.original_price_text(), span=span, location=loc, traced=traced,
+                deviation=price_dev or (q.has_price and not traced),
+                note=price_note or ("" if traced or not q.has_price else
+                                    "No span in the input supports this price."))
+            row.cells["per_piece"] = Cell(
+                value=q.normalized_price_text(), span=span, location=loc, traced=traced,
+                deviation=q.normalization_status == NormalizationStatus.UNRESOLVED and q.has_price,
+                note=q.normalization_note)
+
+            total = None
+            if q.normalized_unit_price is not None and qty:
+                total = q.normalized_unit_price * float(qty)
+            row.cells["line_total"] = Cell(
+                value=("%s %s" % (q.currency, "{:,.2f}".format(total))) if total is not None else "",
+                derived=True,
+                note="Calculated as the per-piece price times the quantity. The supplier did not "
+                     "state a line total.")
+
+            row.cells["moq"] = _term_cell(
+                "{:,.0f} {}".format(q.minimum_order_quantity, q.moq_unit or "pcs")
+                if q.minimum_order_quantity else "", run,
+                extra="Above this line's quantity." if q.moq_constraint else "")
+            row.cells["lead_time"] = _term_cell(
+                q.lead_time_text, run,
+                extra="Read as %g days — an interpretation of a range." % q.lead_time_days
+                if q.lead_time_is_interpreted and q.lead_time_days else "")
+            row.cells["delivery"] = _term_cell(q.delivery_terms, run)
+            row.cells["payment"] = _term_cell(q.payment_terms, run)
+            row.cells["validity"] = _term_cell(
+                q.quote_validity_text, run,
+                extra="A condition, not a fixed period." if q.quote_validity_is_conditional else "")
+
+            for key, a in extras:
+                a_span, a_loc, a_traced = _first_evidence(a.evidence_ids, ev)
+                row.cells[key] = Cell(value=a.answer, span=a_span, location=a_loc, traced=a_traced,
+                                      note=(a.note or "") + " Stated for the whole response, "
+                                                            "not this line specifically.")
+            table.rows.append(row)
+        return table
+
+    # ------------------------------------------------------------- issues
+    def _build_issues(self, run: TestRun, rfq: RFQ) -> List["Issue"]:
+        """Everything worth attention, read off records Phase 2 already produced."""
+        out: List[Issue] = []
+        bundle = run.bundle
+        for row in run.table.rows:
+            q = row.quote
+            subject = row.label
+            if q is None:
+                continue
+            if not q.has_price and q.status != QuoteStatus.NOT_QUOTED:
+                out.append(Issue("missing_price", "Missing price", subject,
+                                 "The supplier did not give a unit price for this line.", row.index))
+            elif q.status == QuoteStatus.NOT_QUOTED:
+                out.append(Issue("not_quoted", "Not quoted", subject,
+                                 "; ".join(q.issues) or "The supplier did not price this line.",
+                                 row.index))
+            if q.match_status in (MatchStatus.PROBABLE_MATCH, MatchStatus.UNMATCHED, MatchStatus.CONFLICT):
+                out.append(Issue("line_match", "Line match needs confirming", subject,
+                                 q.match_reason or "The RFQ line could not be identified safely.",
+                                 row.index))
+            if q.has_price and q.normalization_status == NormalizationStatus.UNRESOLVED:
+                out.append(Issue("unresolved_price", "Price not comparable", subject,
+                                 q.normalization_note, row.index))
+            if q.status == QuoteStatus.CONFLICT:
+                topics = ", ".join(sorted({c.get("topic", "") for c in q.conflicts}))
+                out.append(Issue("conflict", "Contradictory values", subject,
+                                 "The supplier gave more than one answer for %s." % (topics or "a term"),
+                                 row.index))
+            if q.moq_constraint:
+                out.append(Issue("moq", "Minimum order above the requested quantity", subject,
+                                 "; ".join(q.issues) or "", row.index))
+            for key in ("lead_time", "validity", "moq", "delivery"):
+                cell = row.cell(key)
+                if cell.missing:
+                    label = next((c.label for c in run.table.columns if c.key == key), key)
+                    # Lower the first letter so it reads as prose, but leave an acronym
+                    # alone: the column is "MOQ", never "moq".
+                    label = label if label.isupper() else label[:1].lower() + label[1:]
+                    out.append(Issue("missing_field", "Missing %s" % label, subject,
+                                     "The supplier did not state this.", row.index))
+
+        for c in bundle.certifications:
+            if c.status == ClaimStatus.CLAIMED:
+                out.append(Issue("unverified_claim", "Claim without a certificate", c.name,
+                                 c.note or "Stated by the supplier with nothing attached."))
+        for sq in bundle.questions:
+            if not sq.resolved:
+                out.append(Issue("supplier_question", "Supplier is waiting on you", "",
+                                 sq.question))
+        for fig in run.unclaimed_figures:
+            out.append(Issue("unclaimed_figure", "Figure not extracted", fig,
+                             "This appears in the supplier's text but in none of the extracted "
+                             "fields. It may be irrelevant, or it may have been missed."))
+        return _merge_repeats(out)
 
     # ------------------------------------------------------------- promote
     def promote(self, run: TestRun, supplier_service) -> str:
@@ -327,6 +592,70 @@ class SupplierTestbench:
 
 
 # --------------------------------------------------------------------------- #
+def _first_evidence(ids, store) -> Tuple[str, str, bool]:
+    for eid in list(ids or []):
+        e = store.get(eid)
+        if e and e.quoted_text:
+            return e.quoted_text, (e.location or ""), bool(e.verified)
+    return "", "", False
+
+
+def _term_cell(value: str, run: TestRun, extra: str = "") -> Cell:
+    """A response-level term, citing the sentence it appears in rather than the price line."""
+    value = (value or "").strip()
+    if not value:
+        return Cell(note=extra)
+    span, loc = _locate(value, run)
+    return Cell(value=value, span=span, location=loc, traced=bool(span),
+                deviation=not span,
+                note=extra or ("" if span else "This value does not appear verbatim in the input."))
+
+
+
+#: Issue kinds that describe the response as a whole rather than one line. Phase 2 records
+#: them against every affected quote, so listing them per line would repeat one fact eight
+#: times and bury the rest. They are merged into a single entry naming the lines instead.
+RESPONSE_WIDE_KINDS = {"conflict"}
+
+#: How many line names a merged issue spells out before it starts counting.
+MERGED_SUBJECT_LIMIT = 3
+
+
+def _merge_repeats(issues: List["Issue"]) -> List["Issue"]:
+    """Collapse one response-wide finding repeated across lines into a single entry.
+
+    The affected lines are named rather than dropped, and the first one is kept as the
+    jump target, so nothing the buyer could act on is lost.
+    """
+    merged: Dict[Tuple[str, str], Issue] = {}
+    subjects: Dict[Tuple[str, str], List[str]] = {}
+    out: List[Issue] = []
+    for issue in issues:
+        if issue.kind not in RESPONSE_WIDE_KINDS:
+            out.append(issue)
+            continue
+        key = (issue.kind, issue.detail)
+        if key not in merged:
+            merged[key] = issue
+            subjects[key] = []
+            out.append(issue)
+        if issue.subject and issue.subject not in subjects[key]:
+            subjects[key].append(issue.subject)
+
+    for key, issue in merged.items():
+        names = subjects[key]
+        if len(names) <= 1:
+            continue
+        shown = names[:MERGED_SUBJECT_LIMIT]
+        rest = len(names) - len(shown)
+        issue.subject = ", ".join(shown) + (" and %d more" % rest if rest else "")
+    return out
+
+
+def _humanise(key: str) -> str:
+    return (key or "").replace("_", " ").strip().capitalize()
+
+
 def _locate(value: str, run: TestRun) -> Tuple[str, str]:
     """Find the line of input a value appears on, so a term cites its own words.
 
@@ -340,27 +669,48 @@ def _locate(value: str, run: TestRun) -> Tuple[str, str]:
         for segment in _segments(source):
             if needle in _loose(segment):
                 return segment, label
-    # fall back to the numeric part, for "8,000 pcs" against "MOQ is 8000 pcs per size"
-    numbers = _numbers(value)
-    if numbers:
-        for source, label in _input_sources(run):
-            for segment in _segments(source):
-                if numbers & _numbers(segment):
-                    return segment, label
+    # The extractor often rewords a term - "18 days from artwork approval" for "Lead time
+    # 18 days after artwork approval" - so an exact match is too strict. But a shared number
+    # on its own is not evidence: "30 days from date of issue" and "Payment 30% advance"
+    # share a 30 and mean nothing alike, and citing one for the other would put words in the
+    # supplier's mouth. Require the wording to overlap too, and cite nothing when it does not.
+    numbers, words = _numbers(value), _words(value)
+    needed_words = 1 if numbers else 2
+    for source, label in _input_sources(run):
+        for segment in _segments(source):
+            if numbers and not (numbers & _numbers(segment)):
+                continue
+            if len(words & _words(segment)) >= needed_words:
+                return segment, label
     return "", ""
 
 
-#: Sentence-ish boundaries. A supplier email is often one long paragraph, so citing a
-#: whole line would quote the entire message and show nothing useful.
-_SEGMENT = re.compile(r"[^.;\n!?]+(?:[.;!?]|$)")
+#: Words too common to tie a value to a sentence. Sharing only these is not evidence.
+_STOPWORDS = {"from", "with", "this", "that", "will", "been", "have", "your", "our", "and",
+              "the", "for", "are", "per", "all", "please", "there", "their", "them", "into",
+              "within", "after", "before", "against", "shall", "would", "which", "date"}
+
+
+def _words(text: str) -> set:
+    """Distinctive words in a piece of text, for judging whether two phrases are about
+    the same thing."""
+    return {w for w in re.findall(r"[a-z]{4,}", (text or "").lower()) if w not in _STOPWORDS}
+
+
+#: Sentence boundaries, for citing the sentence a value appears in rather than the whole
+#: message. Only punctuation *followed by whitespace* ends a sentence, so a price like
+#: "0.42" is never cut in half; a spreadsheet row carrying no punctuation at all is a
+#: sentence in its own right, which is why lines are split first.
+_SENTENCE_BREAK = re.compile(r"(?<=[.;!?])\s+")
 
 
 def _segments(text: str) -> List[str]:
     out = []
-    for raw in _SEGMENT.findall(text or ""):
-        seg = raw.strip()
-        if seg:
-            out.append(seg[:220])
+    for line in (text or "").splitlines():
+        for raw in _SENTENCE_BREAK.split(line):
+            seg = raw.strip()
+            if seg:
+                out.append(seg[:220])
     return out
 
 

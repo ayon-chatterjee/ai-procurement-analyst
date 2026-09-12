@@ -17,7 +17,7 @@ inject_css()
 copilot = st.Page(page_copilot.render, title="Copilot", icon=":material/auto_awesome:", default=True)
 review = st.Page(page_review.render, title="Review RFQ", icon=":material/fact_check:", url_path="review")
 quotes = st.Page(page_quotes.render, title="Quotes & Comparison", icon=":material/table_chart:", url_path="quotes")
-playground = st.Page(page_playground.render, title="Requirement Playground",
+playground = st.Page(page_playground.render, title="Quotation Extraction Playground",
                      icon=":material/science:", url_path="playground")
 saved = st.Page(page_saved.render, title="Saved RFQs", icon=":material/folder_open:", url_path="saved")
 state.PAGES.update({"copilot": copilot, "review": review, "quotes": quotes,

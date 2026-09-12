@@ -1,19 +1,22 @@
 # Test inventory
 
-201 tests across 9 files. Run with `python3 -m unittest discover -s tests -t .`
+230 tests across 10 files. Run with `python3 -m unittest discover -s tests -t .`
+
+This file is generated: `python3 scripts/make_test_inventory.py`.
 
 | Area | Tests |
 |---|---:|
 | AI boundary (Claude CLI) | 13 |
 | Trust guards (Phase 1) | 37 |
 | Persistence | 4 |
-| Requirement Playground (new) | 17 |
+| Quotation Extraction Playground | 18 |
+| Supplier response test bench | 28 |
 | RFQ service flows (Phase 1) | 16 |
 | Schema, fields & UI glue (Phase 1) | 31 |
 | Document reading & supplier guards (Phase 2) | 30 |
 | Price normalisation & line matching (Phase 2) | 27 |
 | Supplier service, comparison & FX (Phase 2) | 26 |
-| **Total** | **201** |
+| **Total** | **230** |
 
 
 ## AI boundary (Claude CLI)
@@ -118,7 +121,7 @@
 - Survives reopen
 
 
-## Requirement Playground (new)
+## Quotation Extraction Playground
 
 `tests/test_playground.py`
 
@@ -132,6 +135,10 @@
 - Sending an empty result onward is refused
 - Several line items get stable sequential ids
 - Universal fields are populated with their provenance
+
+**Display** (1)
+
+- A unit already in the value is not repeated
 
 **Extraction** (7)
 
@@ -147,6 +154,66 @@
 
 - Supplier service accepts a playground rfq
 - The playground rfq is an ordinary rfq
+
+
+## Supplier response test bench
+
+`tests/test_testbench.py`
+
+**Clean Run** (4)
+
+- A run writes nothing to the database
+- Commercial terms appear once each
+- Every extracted value carries the words it came from
+- The email body is read as a document
+
+**Deviation** (5)
+
+- A bare certification claim is flagged
+- A contradiction is shown with both sides
+- A per kilogram price is flagged as not comparable
+- A price with no supporting span is flagged
+- A quote for a size the rfq does not have is not matched
+
+**Error** (4)
+
+- An empty reply is refused before any model call
+- An extraction failure becomes a readable message
+- An rfq with no lines is refused
+- An unreadable attachment alone is refused
+
+**Merged Issue** (3)
+
+- Different contradictions stay separate
+- Line specific issues are never merged
+- One contradiction across lines is listed once
+
+**Phase2 Untouched** (1)
+
+- The bench uses the real extractor
+
+**Promote** (2)
+
+- Keeping a run makes it a real supplier response
+- Promoting twice does not duplicate
+
+**Provenance** (4)
+
+- A reworded term still cites its own sentence
+- A shared number alone does not make a citation
+- A value taken from the rfq is not shown as supplier evidence
+- A value the supplier never wrote cites nothing
+
+**Segment** (3)
+
+- A decimal price is not cut in half
+- A paragraph still splits into sentences
+- A row without punctuation is a span of its own
+
+**Unclaimed Figure** (2)
+
+- A figure never extracted is listed
+- Figures that were extracted are not listed
 
 
 ## RFQ service flows (Phase 1)
@@ -395,4 +462,3 @@
 **Revision** (1)
 
 - A later response supersedes the earlier one without deleting it
-

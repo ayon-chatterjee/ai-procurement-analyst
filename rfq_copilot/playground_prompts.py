@@ -1,4 +1,4 @@
-"""Prompts for the Requirement Playground.
+"""Prompts for the Quotation Extraction Playground.
 
 Two jobs:
   1. read an arbitrary pile of buyer material and say what is being asked for

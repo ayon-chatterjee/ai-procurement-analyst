@@ -1,4 +1,4 @@
-"""Screen 4 — Requirement Playground.
+"""Screen 4 — Quotation Extraction Playground.
 
 A bench for answering one question in a demo: *given this supplier reply, does the system
 extract the right things?* You pick an RFQ line item, write whatever a supplier might have
@@ -18,13 +18,15 @@ import streamlit as st
 from rfq_copilot.playground_service import PlaygroundError
 from rfq_copilot.rfq_service import RFQStateError
 from rfq_copilot.supplier_testbench import TestbenchError, TestRun
+from . import previews
 from . import state
 from .theme import badge, esc
 
 ACCEPTED = ["pdf", "xlsx", "xlsm", "xls", "csv", "tsv", "docx", "txt", "md", "eml",
             "png", "jpg", "jpeg", "webp"]
 
-GROUP_ORDER = ["Price", "Commercial terms", "Line matching", "Quality", "Other lines"]
+#: The synthetic document the bench writes the email body into.
+EMAIL_DOC = "supplier_email.txt"
 
 SAMPLE = """Thank you for your enquiry.
 
@@ -51,7 +53,16 @@ def render() -> None:
         return
     _step_compose(rfq)
     run = st.session_state.get(state.K_PG_RUN)
-    if isinstance(run, TestRun) and run.rfq_id == rfq.id:
+    if run is not None and not isinstance(run, TestRun):
+        # Reachable only in development: editing a source file makes Streamlit re-import the
+        # module, so a run held from before the reload is an instance of the previous class
+        # object. Say so and drop it - silently showing no result would look like a failed
+        # extraction.
+        st.session_state.pop(state.K_PG_RUN, None)
+        st.warning("The app reloaded while that test was on screen, so the result was dropped. "
+                   "Run the extraction again.")
+        run = None
+    if run is not None and run.rfq_id == rfq.id:
         _step_results(run)
 
 
@@ -59,7 +70,7 @@ def render() -> None:
 def _header() -> None:
     c1, c2 = st.columns([6, 1.5])
     with c1:
-        st.markdown('<div class="rfq-kicker">Requirement playground</div>'
+        st.markdown('<div class="rfq-kicker">Quotation extraction playground</div>'
                     '<div class="rfq-title">Does the system read a supplier reply correctly?</div>',
                     unsafe_allow_html=True)
         st.markdown('<div class="rfq-sub">Pick a line item, write what a supplier might send, and '
@@ -298,105 +309,214 @@ def _materialise(files: List) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Step 3 — input vs output
+# Results — three sections: what arrived, what was understood, what needs a look
 # --------------------------------------------------------------------------- #
 def _step_results(run: TestRun) -> None:
     st.markdown("")
-    st.markdown('<div class="rfq-section-head">Step 3 · what the system understood</div>',
-                unsafe_allow_html=True)
-
-    cols = st.columns(4)
-    cols[0].metric("Fields extracted", run.extracted_count)
-    cols[1].metric("Traced to the text", run.traced_count,
-                   help="The extracted value quotes a span that really appears in what you sent.")
-    cols[2].metric("Deviations", run.deviation_count,
-                   help="Values the system will not assert on its own, plus figures it never picked up.")
-    cols[3].metric("Extraction time", "%.0fs" % (run.duration_ms / 1000.0))
-
-    if run.clean:
-        st.success("Every extracted value traces back to your text, and nothing was left unexplained.")
-    elif run.extracted_count == 0:
-        st.warning("Nothing was extracted from that reply. It may not read as a quotation.")
-    else:
-        st.warning("%d thing%s worth a look below." % (run.deviation_count,
-                                                       "" if run.deviation_count == 1 else "s"))
-
-    if run.unreadable:
-        for name, why in run.unreadable:
-            st.error("**%s** could not be read — %s" % (esc(name), esc(why)))
-
-    left, right = st.columns([4, 6])
-    with left:
-        _input_panel(run)
-    with right:
-        _output_panel(run)
-
-    _unclaimed_panel(run)
+    _section_supplier_response(run)
+    _section_extracted(run)
+    _section_needs_review(run)
     _actions(run)
 
 
-def _input_panel(run: TestRun) -> None:
-    st.markdown("**Input — what the supplier sent**")
-    with st.container(border=True, height=520):
-        if run.subject:
-            st.markdown('<div class="rfq-field-label">Subject</div>', unsafe_allow_html=True)
-            st.markdown(esc(run.subject))
-        if run.body:
-            st.markdown('<div class="rfq-field-label">Body</div>', unsafe_allow_html=True)
-            st.code(run.body, language=None)
-        for d in run.documents:
-            if d["filename"] == "supplier_email.txt":
-                continue
-            st.markdown('<div class="rfq-field-label">%s (%s)</div>'
-                        % (esc(d["filename"]), esc(d["media_type"])), unsafe_allow_html=True)
-            st.code(d["text"][:4000], language=None)
-
-
-def _output_panel(run: TestRun) -> None:
-    st.markdown("**Output — what was extracted, and from which words**")
-    with st.container(border=True, height=520):
-        if not run.rows:
-            st.caption("Nothing was extracted.")
-            return
-        groups: Dict[str, List] = {}
-        for r in run.rows:
-            groups.setdefault(r.group, []).append(r)
-        for group in GROUP_ORDER:
-            rows = groups.get(group)
-            if not rows:
-                continue
-            label = "Quotes for other lines" if group == "Other lines" else group
-            st.markdown('<div class="rfq-field-label">%s</div>' % esc(label), unsafe_allow_html=True)
-            for r in rows:
-                _row(r)
-            st.markdown("")
-
-
-def _row(r) -> None:
-    mark = {"deviation": ("conflict", "⚠"), "traced": ("buyer", "✓"), "untraced": ("recommended", "?")}[r.marker]
-    st.markdown('%s **%s** — %s' % (badge(mark[0], mark[1]), esc(r.field), esc(r.extracted or "—")),
+# --------------------------------------------------------------------------- #
+# Section 1 — Supplier Response
+# --------------------------------------------------------------------------- #
+def _section_supplier_response(run: TestRun) -> None:
+    st.markdown('<div class="pg-section"><div class="pg-section-title">Supplier Response</div>'
+                '<div class="pg-section-sub">What the supplier sent us</div></div>',
                 unsafe_allow_html=True)
-    if r.span:
-        where = (" · %s" % r.location) if r.location else ""
-        st.markdown('<div class="rfq-sub" style="margin-left:1.4rem">from “%s”%s</div>'
-                    % (esc(r.span[:150]), esc(where)), unsafe_allow_html=True)
-    elif r.marker != "traced":
-        st.markdown('<div class="rfq-sub" style="margin-left:1.4rem">no supporting span found</div>',
-                    unsafe_allow_html=True)
-    if r.note:
-        st.markdown('<div class="rfq-sub" style="margin-left:1.4rem;color:#92400E">%s</div>'
-                    % esc(r.note[:200]), unsafe_allow_html=True)
+
+    attachments = [d for d in run.documents if d["filename"] != EMAIL_DOC]
+    body_col, att_col = st.columns([5, 4], gap="large") if attachments else (st.container(), None)
+
+    with body_col:
+        with st.container(border=True):
+            st.markdown('<div class="pg-label">Email from %s</div>' % esc(run.supplier_name),
+                        unsafe_allow_html=True)
+            if run.subject:
+                st.markdown('<div class="pg-subject">%s</div>' % esc(run.subject), unsafe_allow_html=True)
+            if run.body:
+                st.markdown('<div class="pg-email">%s</div>' % esc(run.body).replace("\n", "<br>"),
+                            unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="rfq-field-value dim">No email body — the quotation is in '
+                            'the attachment%s.</div>' % ("" if len(attachments) == 1 else "s"),
+                            unsafe_allow_html=True)
+
+    if att_col is not None:
+        with att_col:
+            st.markdown('<div class="pg-label">Attachments · %d</div>' % len(attachments),
+                        unsafe_allow_html=True)
+            for i, doc in enumerate(attachments):
+                _attachment_card(doc, i)
+
+    for name, why in run.unreadable:
+        st.error("**%s** could not be read — %s" % (esc(name), esc(why)))
 
 
-def _unclaimed_panel(run: TestRun) -> None:
-    if not run.unclaimed_figures:
-        return
+def _attachment_card(doc: Dict[str, Any], index: int) -> None:
+    media = doc.get("media_type", "")
+    name = doc.get("filename", "attachment")
+    path = doc.get("path", "")
     with st.container(border=True):
-        st.markdown("**Figures in your text that appear nowhere in the output**")
-        st.markdown(" ".join(badge("conflict", f) for f in run.unclaimed_figures), unsafe_allow_html=True)
-        st.caption("A hint, not a verdict. Some of these will be irrelevant — a reference number, "
-                   "a phone number, a figure the supplier mentioned in passing. Worth checking "
-                   "whether any of them should have been picked up.")
+        thumb = previews.thumbnail(path, media)
+        if thumb:
+            st.image(thumb, use_container_width=True)
+        else:
+            st.markdown('<div class="pg-thumb-fallback">%s</div>' % previews.icon(media),
+                        unsafe_allow_html=True)
+        meta = " · ".join(x for x in (previews.type_label(media),
+                                      previews.human_size(doc.get("bytes", 0))) if x)
+        st.markdown('<div class="pg-att-name">%s</div><div class="pg-att-meta">%s</div>'
+                    % (esc(name), esc(meta)), unsafe_allow_html=True)
+        with st.popover("View", use_container_width=True):
+            _attachment_preview(doc, thumb)
+
+
+def _attachment_preview(doc: Dict[str, Any], thumb: Optional[str]) -> None:
+    media, path, name = doc.get("media_type", ""), doc.get("path", ""), doc.get("filename", "")
+    st.markdown("**%s**" % esc(name))
+    if media == "image" and path:
+        st.image(path, use_container_width=True)
+    elif thumb:
+        st.image(thumb, use_container_width=True)
+    rows = previews.spreadsheet_rows(path)
+    if rows:
+        st.caption("First rows")
+        st.dataframe(pd.DataFrame(rows[1:], columns=_unique_headers(rows[0])),
+                     hide_index=True, use_container_width=True)
+    st.caption("What the system read from this file (%s)" % esc(doc.get("method", "")))
+    st.code((doc.get("text") or "")[:3000], language=None)
+
+
+def _unique_headers(row: List[str]) -> List[str]:
+    """Spreadsheets often repeat or omit header cells; make them usable as columns."""
+    out, seen = [], {}
+    for i, value in enumerate(row):
+        label = (str(value).strip() or "col %d" % (i + 1))
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else "%s (%d)" % (label, seen[label]))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Section 2 — What AI Extracted
+# --------------------------------------------------------------------------- #
+def _section_extracted(run: TestRun) -> None:
+    st.markdown('<div class="pg-section"><div class="pg-section-title">What AI Extracted</div>'
+                '<div class="pg-section-sub">Structured information identified from the supplier '
+                'response</div></div>', unsafe_allow_html=True)
+
+    table = run.table
+    counts = table.counts()
+    needs_review = len(run.issues)
+    cols = st.columns(4)
+    cols[0].metric("Line items", counts["line_items"],
+                   help="Quotation lines found in the supplier's response.")
+    cols[1].metric("Fields extracted", counts["fields"],
+                   help="Individual values read out of the email and attachments.")
+    cols[2].metric("Missing information", counts["missing"],
+                   help="Fields the supplier did not provide for a line.")
+    cols[3].metric("Needs review", needs_review,
+                   help="Things the system will not assert on its own. Listed below.")
+
+    if not table.rows:
+        st.warning("No quotation lines were found in that response.")
+        return
+
+    st.dataframe(_frame(table), hide_index=True, use_container_width=True,
+                 column_config={"#": st.column_config.NumberColumn("#", width="small")})
+    st.caption("Scroll sideways for the remaining columns. A dash means the supplier did not "
+               "provide that field. Pick a line below to see where each value came from.")
+
+    _trace_panel(run)
+
+
+def _frame(table) -> pd.DataFrame:
+    data = []
+    for row in table.rows:
+        record = {"#": row.index}
+        for col in table.columns:
+            record[col.label] = row.cell(col.key).display()
+        data.append(record)
+    return pd.DataFrame(data, columns=["#"] + [c.label for c in table.columns])
+
+
+def _trace_panel(run: TestRun) -> None:
+    """Where each value came from, for one line at a time, instead of under every field."""
+    table = run.table
+    labels = ["%d · %s" % (r.index, r.label) for r in table.rows]
+    target = st.session_state.pop(state.K_PG_FOCUS, None)
+    index = 0
+    if target is not None:
+        index = max(0, min(int(target) - 1, len(labels) - 1))
+    picked = st.selectbox("Trace a line", labels, index=index, key="pg_trace_pick")
+    row = table.rows[labels.index(picked)]
+
+    st.markdown('<div class="pg-label">Where each value came from</div>', unsafe_allow_html=True)
+    left, right = st.columns(2, gap="large")
+    for i, col in enumerate(table.columns):
+        cell = row.cell(col.key)
+        with (left if i % 2 == 0 else right):
+            _trace_row(col.label, cell)
+
+
+def _trace_row(label: str, cell) -> None:
+    if cell.missing:
+        st.markdown('%s <b>%s</b> — <span class="pg-missing">not provided</span>'
+                    % (badge("na", "—"), esc(label)), unsafe_allow_html=True)
+        return
+    if cell.derived:
+        mark = badge("ai", "calculated")
+    elif cell.from_rfq:
+        mark = badge("buyer", "from RFQ")
+    elif cell.deviation:
+        mark = badge("conflict", "⚠")
+    elif cell.traced:
+        mark = badge("buyer", "✓")
+    else:
+        mark = badge("recommended", "?")
+    st.markdown("%s <b>%s</b> — %s" % (mark, esc(label), esc(cell.display())), unsafe_allow_html=True)
+    if cell.span:
+        where = (" · %s" % cell.location) if cell.location else ""
+        st.markdown('<div class="pg-span">“%s”%s</div>' % (esc(cell.span[:160]), esc(where)),
+                    unsafe_allow_html=True)
+    elif not cell.derived and not cell.from_rfq:
+        st.markdown('<div class="pg-span">no supporting span found</div>', unsafe_allow_html=True)
+    if cell.note:
+        st.markdown('<div class="pg-note">%s</div>' % esc(cell.note[:180]), unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Section 3 — Needs Review
+# --------------------------------------------------------------------------- #
+def _section_needs_review(run: TestRun) -> None:
+    st.markdown('<div class="pg-section"><div class="pg-section-title">Needs Review</div>'
+                '<div class="pg-section-sub">Information that may require your attention</div></div>',
+                unsafe_allow_html=True)
+    if not run.issues:
+        st.success("Nothing needs review. Every extracted value traces back to the supplier's "
+                   "words, and no field was left unexplained.")
+        return
+
+    for i, issue in enumerate(run.issues):
+        with st.container(border=True):
+            c1, c2 = st.columns([7, 1.4])
+            with c1:
+                head = esc(issue.title)
+                if issue.subject:
+                    head += ' <span class="pg-issue-subject">%s</span>' % esc(issue.subject)
+                st.markdown('<span class="pg-issue-mark">⚠</span> <b>%s</b>' % head,
+                            unsafe_allow_html=True)
+                if issue.detail:
+                    st.markdown('<div class="pg-note">%s</div>' % esc(issue.detail[:220]),
+                                unsafe_allow_html=True)
+            with c2:
+                if issue.row_index is not None:
+                    if st.button("Show line", key="pg_jump_%d" % i, use_container_width=True):
+                        st.session_state[state.K_PG_FOCUS] = issue.row_index
+                        st.rerun()
 
 
 def _actions(run: TestRun) -> None:

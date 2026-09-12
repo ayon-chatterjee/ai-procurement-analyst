@@ -1,4 +1,4 @@
-"""Requirement Playground — a new way in, not a new engine.
+"""Quotation Extraction Playground — a new way in, not a new engine.
 
 Give it an email, some attachments, or both, and it works out what is being asked for.
 Everything downstream is the existing application:

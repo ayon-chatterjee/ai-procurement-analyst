@@ -1,4 +1,4 @@
-"""Structured contract for the Requirement Playground extractor.
+"""Structured contract for the Quotation Extraction Playground extractor.
 
 The playground answers a different question from Phase 1's copilot. The copilot
 *interviews* a buyer; the playground is handed a pile of material — an email, a
