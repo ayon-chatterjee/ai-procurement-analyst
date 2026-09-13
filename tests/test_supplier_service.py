@@ -16,6 +16,7 @@ from rfq_copilot.supplier_models import (
 )
 from rfq_copilot.supplier_service import CellState, SupplierService
 from tests.supplier_helpers import (
+    NO_EVIDENCE,
     ScriptedAI, carton_rfq, evidence, extraction_payload, match, match_payload, quote_line,
 )
 
@@ -106,6 +107,29 @@ class ExtractionFlowTest(ServiceHarness):
         resp, _ = self.register(svc, "Partial Supplier", DOC_A)
         bundle = svc.extract_response(resp.id)
         self.assertEqual(bundle.response.response_type, ResponseType.PARTIAL_QUOTE)
+
+    def test_a_reply_with_no_prices_is_flagged_not_called_a_quote(self):
+        """A covering email saying "quotation attached", with no attachment. Reporting
+        that as "quote received · extracted" made the screen look like a success and left
+        the buyer to open an expander to discover there were no numbers in it."""
+        svc, _ = self.build([extraction_payload(quote_lines=[])])
+        resp, _ = self.register(svc, "PrimeSpace", "Please find our quotation attached.")
+        bundle = svc.extract_response(resp.id)
+        self.assertEqual(bundle.response.response_type, ResponseType.NEEDS_REVIEW)
+        self.assertEqual(bundle.response.extraction_status, ExtractionStatus.NEEDS_REVIEW)
+        self.assertIn("No prices were found", bundle.response.extraction_note)
+
+    def test_a_supplier_who_only_asks_a_question_is_still_a_question(self):
+        """The no-price rule must not swallow the case that already had a name."""
+        payload = extraction_payload(quote_lines=[], supplier_questions=[
+            {"question": "Double-wall board for the large sizes?",
+             "related_field_key": None,
+             "evidence": {"quoted_text": "Double-wall board for the large sizes?",
+                          "location": "line 1"}}])
+        svc, _ = self.build([payload])
+        resp, _ = self.register(svc, "Viet Carton", "One question before we quote.")
+        bundle = svc.extract_response(resp.id)
+        self.assertEqual(bundle.response.response_type, ResponseType.QUESTION)
 
     def test_one_supplier_failing_does_not_stop_the_others(self):
         good = extraction_payload(

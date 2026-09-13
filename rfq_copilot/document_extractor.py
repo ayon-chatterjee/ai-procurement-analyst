@@ -161,6 +161,7 @@ class XlsxExtractor(DocumentExtractor):
                                    note="openpyxl is not installed, so this workbook cannot be read.")
         wb = load_workbook(path, data_only=True, read_only=True)
         blocks, lines = [], []
+        seen = set()
         for ws in wb.worksheets:
             lines.append("### Sheet: %s" % ws.title)
             for row in ws.iter_rows():
@@ -170,6 +171,7 @@ class XlsxExtractor(DocumentExtractor):
                         continue
                     text = str(c.value).strip()
                     ref = "%s%d" % (c.column_letter, c.row)
+                    seen.add((ws.title, ref))
                     cells.append("%s=%s" % (ref, text))
                     blocks.append(ExtractedBlock(
                         text=text, location="Sheet %s · cell %s" % (ws.title, ref),
@@ -177,8 +179,49 @@ class XlsxExtractor(DocumentExtractor):
                 if cells:
                     lines.append("  " + " | ".join(cells))
         wb.close()
+
+        # A workbook written by a program and never opened in Excel carries formulas with
+        # no cached result, and `data_only` returns None for every one of them. Dropping
+        # them silently loses a whole column — a quotation whose only prices are a computed
+        # "Total" would read as having no prices at all. They are listed rather than
+        # evaluated: guessing at a supplier's arithmetic is the kind of invention this
+        # pipeline exists to prevent, and the buyer needs to know the column was there.
+        pending = [(sheet, ref, f) for (sheet, ref), f in self._formula_map(path).items()
+                   if (sheet, ref) not in seen]
+        note = ""
+        if pending:
+            lines.append("")
+            lines.append("### Cells holding a formula this file never stored a result for")
+            lines.append("  (the workbook was never recalculated; no value is available)")
+            for sheet, ref, formula in sorted(pending)[:60]:
+                lines.append("  Sheet %s · %s = %s" % (sheet, ref, formula))
+            note = ("%d cell(s) hold a formula the workbook never stored a result for. They "
+                    "are listed as formulas rather than guessed at." % len(pending))
         return DocumentContent(text="\n".join(lines), blocks=blocks, media_type="xlsx",
-                               method="openpyxl cell read", status=ExtractionStatus.EXTRACTED)
+                               method="openpyxl cell read", note=note,
+                               status=ExtractionStatus.EXTRACTED)
+
+    @staticmethod
+    def _formula_map(path: str):
+        """Every cell holding a formula, keyed by (sheet, ref). Empty if the file cannot be
+        re-opened — a missing map costs a note, never the read."""
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(path, data_only=False, read_only=True)
+        except Exception:
+            return {}
+        out = {}
+        try:
+            for ws in wb.worksheets:
+                for row in ws.iter_rows():
+                    for c in row:
+                        value = getattr(c, "value", None)
+                        if isinstance(value, str) and value.startswith("="):
+                            out[(ws.title, "%s%d" % (c.column_letter, c.row))] = value[:60]
+            wb.close()
+        except Exception:
+            pass
+        return out
 
 
 # --------------------------------------------------------------------------- #

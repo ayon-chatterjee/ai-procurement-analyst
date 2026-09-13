@@ -1,6 +1,6 @@
 # Test inventory
 
-565 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+568 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -13,9 +13,9 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier response test bench | 28 |
 | RFQ service flows (Phase 1) | 17 |
 | Schema, fields & UI glue (Phase 1) | 33 |
-| Document reading & supplier guards (Phase 2) | 37 |
+| Document reading & supplier guards (Phase 2) | 38 |
 | Price normalisation & line matching (Phase 2) | 30 |
-| Supplier service, comparison & FX (Phase 2) | 46 |
+| Supplier service, comparison & FX (Phase 2) | 48 |
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 31 |
 | Analyst service & conversation (Phase 3) | 27 |
@@ -23,7 +23,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 61 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **565** |
+| **Total** | **568** |
 
 
 ## AI boundary (Claude CLI)
@@ -349,8 +349,9 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A subunit without its currency is not a price
 - Known codes and unambiguous symbols pass
 
-**Document Extraction** (8)
+**Document Extraction** (9)
 
+- A formula with no cached result is listed not dropped
 - Docx numbers paragraphs
 - Image extractor does not fake a transcript
 - Image transcripts are capped below full confidence
@@ -484,9 +485,11 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - No rate table means no conversion rather than a guess
 - Same currency needs no rate
 
-**Extraction Flow** (7)
+**Extraction Flow** (9)
 
 - A clean response is extracted matched and persisted
+- A reply with no prices is flagged not called a quote
+- A supplier who only asks a question is still a question
 - An omitted line is missing not zero
 - Extraction calls are audited
 - Invalid output is retried once then recorded as failed

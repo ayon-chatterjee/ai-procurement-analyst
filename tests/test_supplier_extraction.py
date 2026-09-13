@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 
 from rfq_copilot import supplier_guards as sg
@@ -30,6 +31,31 @@ class DocumentExtractionTest(unittest.TestCase):
         self.assertTrue(cells, "evidence needs addressable cells")
         self.assertTrue(any(b.sheet == "Quotation" for b in cells))
         self.assertTrue(any("cell" in b.location for b in cells))
+
+    def test_a_formula_with_no_cached_result_is_listed_not_dropped(self):
+        """A workbook written by a program and never opened in Excel stores no result for
+        its formulas. Dropping those cells silently loses a whole column — a quotation
+        whose only prices are a computed Total would read as having no prices at all."""
+        import openpyxl
+        tmp = tempfile.mkdtemp(prefix="xlsx_formula_")
+        path = os.path.join(tmp, "quote.xlsx")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Quotation"
+        ws["A1"], ws["B1"], ws["C1"] = "Item", "Qty", "Unit Price"
+        ws["D1"] = "Total"
+        ws["A2"], ws["B2"], ws["C2"] = "Desk", 120, 18500
+        ws["D2"] = "=B2*C2"          # never calculated: openpyxl writes no cached value
+        wb.save(path)
+
+        c = XlsxExtractor().extract(path)
+        self.assertEqual(c.status, ExtractionStatus.EXTRACTED)
+        self.assertIn("18500", c.text, "the values that do exist still come through")
+        self.assertIn("=B2*C2", c.text, "the formula cell must not vanish")
+        self.assertIn("never stored a result", c.text)
+        self.assertIn("formula", c.note)
+        self.assertNotIn("2220000", c.text,
+                         "the reader must not evaluate a supplier's arithmetic for them")
 
     def test_pdf_pages_are_separated_and_not_duplicated(self):
         c = PdfExtractor().extract(fixture("supplier_b_quote.pdf"))

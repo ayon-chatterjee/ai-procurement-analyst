@@ -419,7 +419,23 @@ class SupplierExtractor:
             elif priced:
                 r.response_type = ResponseType.QUOTE_RECEIVED
 
-        r.extraction_status = ExtractionStatus.NEEDS_REVIEW if bundle.needs_review() else ExtractionStatus.EXTRACTED
+        # A response that priced nothing, declined nothing and asked nothing is not a
+        # quote, whatever the covering email called itself. The usual cause is a
+        # quotation referred to but never attached, and reporting that as "quote
+        # received · extracted" is the most misleading thing this function could do:
+        # the screen looks like a success and the buyer has to open an expander to
+        # discover there are no numbers in it.
+        if not priced and not bundle.questions and r.response_type in (
+                ResponseType.QUOTE_RECEIVED, ResponseType.PARTIAL_QUOTE,
+                ResponseType.REVISION_RECEIVED):
+            r.response_type = ResponseType.NEEDS_REVIEW
+            note = ("No prices were found in what was supplied. "
+                    + (r.extraction_note or "")).strip()
+            r.extraction_note = note[:400]
+
+        r.extraction_status = (ExtractionStatus.NEEDS_REVIEW
+                               if bundle.needs_review() or not priced
+                               else ExtractionStatus.EXTRACTED)
         r.updated_at = utc_now()
 
 
