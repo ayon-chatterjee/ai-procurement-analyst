@@ -421,3 +421,11 @@ The engine a weighted Phase 4 would need is in place either way:
 line, coverage, MOQ, lead time, qualification — and `award_calculations.propose_award`
 reuses those same functions rather than reimplementing the price rule, so a scoring layer
 would slot in beside `clears_bars` without a second source of truth.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Ayon Chatterjee.
+
+The demo dataset is fabricated: supplier names, contacts, documents and prices are invented.
