@@ -67,6 +67,29 @@ def normalize_price(quote: SupplierQuote) -> SupplierQuote:
                                                _money(quote.currency, quote.unit_price)))
         return quote
 
+    if quote.price_basis == PriceBasis.UNKNOWN:
+        # An itemised email that never writes the words "per unit" is the commonest reply
+        # there is, and voiding its prices made the product useless on exactly that case —
+        # the buyer saw "unresolved" against four figures the supplier had stated plainly.
+        #
+        # So the figure is read as a price per unit and the reading is declared, rather
+        # than either asserted silently or thrown away. The quote is held for review, which
+        # keeps it out of every comparison and out of any award until the buyer confirms
+        # it: the number becomes visible, never authoritative.
+        quote.normalized_unit_price = round(float(quote.effective_unit_price or quote.unit_price), 6)
+        quote.normalization_status = NormalizationStatus.NORMALIZED
+        quote.normalization_note = (
+            "Read as a price per %s. The supplier gave a figure without saying what one "
+            "price covers, so this is an assumption — confirm it before awarding."
+            % (quote.quoted_unit or "unit"))
+        quote.price_basis_assumed = True
+        if quote.status == QuoteStatus.QUOTED:
+            quote.status = QuoteStatus.NEEDS_REVIEW
+        note = "The price basis was not stated; it is read as a price per unit."
+        if note not in quote.issues:
+            quote.issues.append(note)
+        return quote
+
     quote.normalized_unit_price = None
     quote.normalization_status = NormalizationStatus.UNRESOLVED
     reasons = {
@@ -74,7 +97,6 @@ def normalize_price(quote: SupplierQuote) -> SupplierQuote:
                            "which the supplier has not given.",
         PriceBasis.PER_SET: "Quoted per set. A per-piece price needs the number of pieces in a set.",
         PriceBasis.PER_LOT: "Quoted as a lot price, which cannot be split across pieces.",
-        PriceBasis.UNKNOWN: "The supplier did not make clear what one quoted price covers.",
     }
     quote.normalization_note = reasons.get(quote.price_basis, "Cannot be reduced to a per-piece price.")
     if quote.status == QuoteStatus.QUOTED:

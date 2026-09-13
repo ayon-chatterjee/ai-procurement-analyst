@@ -1,6 +1,6 @@
 # Test inventory
 
-571 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+573 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -14,7 +14,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | RFQ service flows (Phase 1) | 17 |
 | Schema, fields & UI glue (Phase 1) | 33 |
 | Document reading & supplier guards (Phase 2) | 41 |
-| Price normalisation & line matching (Phase 2) | 30 |
+| Price normalisation & line matching (Phase 2) | 32 |
 | Supplier service, comparison & FX (Phase 2) | 48 |
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 31 |
@@ -23,7 +23,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 61 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **571** |
+| **Total** | **573** |
 
 
 ## AI boundary (Claude CLI)
@@ -431,12 +431,14 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A satisfied minimum is not flagged
 - Moq is separate from quoted quantity
 
-**Normalization** (5)
+**Normalization** (7)
 
+- A basis the supplier did state is never assumed away
 - A weight price cannot become a piece price
-- An unknown basis is unresolved rather than assumed per piece
+- An unstated basis is read as per unit and says so
 - No price is not a zero
 - Safe divisions are performed
+- That assumption is held for review not treated as settled
 - The original quote is never destroyed
 
 **Price Basis** (1)

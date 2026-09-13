@@ -28,6 +28,7 @@ HARD RULES (the application validates these and discards violations):
 3. Never assume an unanswered questionnaire item means "no".
 4. Preserve exact numbers. Do not round, convert, or recalculate anything.
 5. Preserve the supplier's own unit word, their currency, and their price basis. If a price is "per 100 pieces" then unit_price is that number and price_basis is per_100. Never divide it down yourself; the application does that where it is safe.
+5a. When a supplier lists one figure against one line item and says nothing about what that figure covers - "Item 2 - chair - 9,100 INR" - that is a price per unit. Use per_unit. Reserve "unknown" for a price whose own wording implies it covers more than one piece without saying how many: a lot, a set, a pack, a bundle, a carton of unstated count. Guessing per_unit where the supplier wrote "per set" is an error; so is refusing to read an ordinary itemised quotation because the words "per unit" are absent.
 6. A price hedged as approximate, indicative, ballpark or subject to confirmation has price_is_indicative true. Never present it as a firm quote.
 7. Discounts belong in commercial_terms.discount, with the qualifying condition. Never fold a discount into a price.
 8. Minimum order quantity is not the quoted quantity. Keep them apart.

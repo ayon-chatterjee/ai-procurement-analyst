@@ -50,10 +50,31 @@ class NormalizationTest(unittest.TestCase):
         self.assertEqual(q.status, QuoteStatus.UNRESOLVED)
         self.assertIn("weight", q.normalization_note.lower())
 
-    def test_an_unknown_basis_is_unresolved_rather_than_assumed_per_piece(self):
+    def test_an_unstated_basis_is_read_as_per_unit_and_says_so(self):
+        """An itemised email that never writes the words "per unit" is the commonest reply
+        there is. Voiding its prices showed the buyer "unresolved" against four figures the
+        supplier had stated plainly, so the figure is kept and the reading is declared."""
         q = normalize_price(quote(5.0, PriceBasis.UNKNOWN))
-        self.assertEqual(q.normalization_status, NormalizationStatus.UNRESOLVED)
-        self.assertIsNone(q.normalized_unit_price)
+        self.assertEqual(q.normalized_unit_price, 5.0)
+        self.assertEqual(q.normalization_status, NormalizationStatus.NORMALIZED)
+        self.assertTrue(q.price_basis_assumed)
+        self.assertIn("assumption", q.normalization_note)
+
+    def test_that_assumption_is_held_for_review_not_treated_as_settled(self):
+        """Visible, never authoritative: a quote at NEEDS_REVIEW is excluded from every
+        comparison and cannot be seeded into an award."""
+        q = normalize_price(quote(5.0, PriceBasis.UNKNOWN))
+        self.assertEqual(q.status, QuoteStatus.NEEDS_REVIEW)
+        self.assertTrue(any("not stated" in i for i in q.issues))
+
+    def test_a_basis_the_supplier_did_state_is_never_assumed_away(self):
+        """The guard that matters stays: per-set and per-kg are still refused, because
+        those the supplier actually told us, and they are not per-piece."""
+        for basis in (PriceBasis.PER_SET, PriceBasis.PER_KG, PriceBasis.PER_LOT):
+            q = normalize_price(quote(5.0, basis))
+            self.assertIsNone(q.normalized_unit_price, basis.value)
+            self.assertEqual(q.normalization_status, NormalizationStatus.UNRESOLVED)
+            self.assertFalse(q.price_basis_assumed)
 
     def test_no_price_is_not_a_zero(self):
         q = normalize_price(quote(None))

@@ -300,6 +300,9 @@ class SupplierQuote:
     minimum_order_quantity: Optional[float] = None
     moq_unit: str = ""
     moq_constraint: bool = False              # RFQ quantity is below the supplier's MOQ
+    #: The supplier never said what one price covers and it was read as per-unit.
+    #: Recorded so the assumption can be shown and, later, confirmed away.
+    price_basis_assumed: bool = False
     lead_time_text: str = ""                  # verbatim, e.g. "20-25 working days after artwork approval"
     lead_time_days: Optional[float] = None    # only when unambiguous
     lead_time_is_interpreted: bool = False    # True when days were derived from a range
