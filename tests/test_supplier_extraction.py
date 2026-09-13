@@ -7,6 +7,7 @@ import unittest
 
 from rfq_copilot import supplier_guards as sg
 from rfq_copilot.document_extractor import (
+    _pdf_unescape,
     DocumentExtractorRegistry, DocxExtractor, PdfExtractor, TextExtractor, XlsxExtractor,
 )
 from rfq_copilot.supplier_models import (
@@ -67,6 +68,43 @@ class DocumentExtractionTest(unittest.TestCase):
         self.assertIn("5% discount", page2, "the buried footnote must survive extraction")
         self.assertIn("25 days", page3, "the contradicting lead time is on another page")
         self.assertNotEqual(page2, page3)
+
+    def test_an_ascii85_compressed_pdf_is_read(self):
+        """ReportLab — which a great many quotation tools embed — writes
+        /Filter [/ASCII85Decode /FlateDecode] by default. Handling only Flate meant those
+        PDFs reported "no extractable text operators" and the buyer was told, wrongly,
+        that their quotation looked like a scan."""
+        from reportlab.pdfgen import canvas
+        tmp = tempfile.mkdtemp(prefix="pdf_a85_")
+        path = os.path.join(tmp, "quote.pdf")
+        c = canvas.Canvas(path)
+        c.drawString(72, 800, "Workstation 120 units at INR 19,200 each")
+        c.drawString(72, 780, "Lead time 20-25 days. MOQ 25 units.")
+        c.save()
+
+        out = PdfExtractor().extract(path)
+        self.assertEqual(out.status, ExtractionStatus.EXTRACTED, out.note)
+        self.assertIn("19,200", out.text)
+        self.assertIn("MOQ 25 units", out.text)
+
+    def test_an_undecodable_pdf_says_why_instead_of_blaming_a_scanner(self):
+        """A PDF we cannot decompress is not the same thing as a photograph of a page, and
+        telling a supplier the wrong one sends them to fix the wrong problem."""
+        body = b"1 0 obj<</Filter/JBIG2Decode/Length 4>>stream\n\x00\x01\x02\x03\nendstream endobj"
+        tmp = tempfile.mkdtemp(prefix="pdf_odd_")
+        path = os.path.join(tmp, "odd.pdf")
+        with open(path, "wb") as f:
+            f.write(b"%PDF-1.4\n" + body)
+        out = PdfExtractor().extract(path)
+        self.assertEqual(out.status, ExtractionStatus.UNSUPPORTED)
+        self.assertIn("JBIG2Decode", out.note)
+
+    def test_an_octal_escape_becomes_the_character_it_stands_for(self):
+        """A pound or euro sign written as \\243 would otherwise reach the currency guard as
+        the literal text "\\243", and be refused as a price it should have accepted."""
+        self.assertEqual(_pdf_unescape(rb"(Procurement \226 New Office)"),
+                         "Procurement \u2013 New Office")
+        self.assertEqual(_pdf_unescape(rb"(\24312.50 per unit)"), "\u00a312.50 per unit")
 
     def test_docx_numbers_paragraphs(self):
         c = DocxExtractor().extract(fixture("supplier_c_response.docx"))

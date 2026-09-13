@@ -1,6 +1,6 @@
 # Test inventory
 
-568 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+571 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -13,7 +13,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier response test bench | 28 |
 | RFQ service flows (Phase 1) | 17 |
 | Schema, fields & UI glue (Phase 1) | 33 |
-| Document reading & supplier guards (Phase 2) | 38 |
+| Document reading & supplier guards (Phase 2) | 41 |
 | Price normalisation & line matching (Phase 2) | 30 |
 | Supplier service, comparison & FX (Phase 2) | 48 |
 | Analyst calculations (Phase 3) | 65 |
@@ -23,7 +23,7 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Supplier communication guards (Phase 5) | 40 |
 | Award lifecycle, execution & audit (Phase 5) | 61 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **568** |
+| **Total** | **571** |
 
 
 ## AI boundary (Claude CLI)
@@ -349,9 +349,12 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A subunit without its currency is not a price
 - Known codes and unambiguous symbols pass
 
-**Document Extraction** (9)
+**Document Extraction** (12)
 
 - A formula with no cached result is listed not dropped
+- An ascii85 compressed pdf is read
+- An octal escape becomes the character it stands for
+- An undecodable pdf says why instead of blaming a scanner
 - Docx numbers paragraphs
 - Image extractor does not fake a transcript
 - Image transcripts are capped below full confidence

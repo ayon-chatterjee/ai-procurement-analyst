@@ -22,6 +22,7 @@ invent content for a document we could not open.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -230,11 +231,23 @@ _TJ_ARRAY = re.compile(rb"\[(.*?)\]\s*TJ", re.S)
 _STR_IN_ARRAY = re.compile(rb"\((?:\\.|[^\\()])*\)", re.S)
 
 
+#: \ddd inside a PDF string literal. Left undecoded these surfaced as the literal text
+#: "\226", which matters beyond tidiness: a pound or euro sign written this way would be
+#: garbled, and the currency guard would then refuse a price it should have accepted.
+_PDF_OCTAL = re.compile(rb"\\([0-7]{1,3})")
+
+
 def _pdf_unescape(raw: bytes) -> str:
     s = raw[1:-1]  # strip the surrounding parentheses
     s = s.replace(b"\\(", b"(").replace(b"\\)", b")").replace(b"\\\\", b"\\")
     s = s.replace(b"\\n", b"\n").replace(b"\\r", b"").replace(b"\\t", b"\t")
-    return s.decode("latin-1", "replace")
+    s = _PDF_OCTAL.sub(lambda m: bytes([int(m.group(1), 8) & 0xFF]), s)
+    # cp1252 first: PDF's default encodings put the dashes, quotes and currency signs in
+    # the 0x80-0x9F range that latin-1 leaves as control characters.
+    try:
+        return s.decode("cp1252")
+    except UnicodeDecodeError:
+        return s.decode("latin-1", "replace")
 
 
 class PdfExtractor(DocumentExtractor):
@@ -250,8 +263,9 @@ class PdfExtractor(DocumentExtractor):
         streams = self._streams(data)
         if not streams:
             return DocumentContent(media_type="pdf", status=ExtractionStatus.UNSUPPORTED,
-                                   note="No readable text streams. This looks like a scanned PDF; "
-                                        "text extraction was not attempted rather than guessed.")
+                                   note=self._failure_note(data,
+                                        "No readable text streams. This looks like a scanned PDF; "
+                                        "text extraction was not attempted rather than guessed."))
         blocks, pages_text = [], []
         for page_no, stream in enumerate(streams, start=1):
             lines = self._text_lines(stream)
@@ -262,12 +276,63 @@ class PdfExtractor(DocumentExtractor):
                 blocks.append(ExtractedBlock(text=line, location="Page %d" % page_no, page=page_no))
         if not blocks:
             return DocumentContent(media_type="pdf", status=ExtractionStatus.UNSUPPORTED,
-                                   note="The PDF has content streams but no extractable text operators.")
+                                   note=self._failure_note(data,
+                                        "The PDF has content streams but no extractable text "
+                                        "operators. It is most likely a scanned image."))
         return DocumentContent(text="\n".join(pages_text), blocks=blocks, media_type="pdf",
                                method="pdf content-stream parse", status=ExtractionStatus.EXTRACTED)
 
+    #: Stream filters this reader can undo. A PDF may chain them — ReportLab, which is
+    #: what a great many quotation tools embed, writes /Filter [/ASCII85Decode /FlateDecode]
+    #: by default — so they are applied in the order the file lists them.
+    DECODERS = ("FlateDecode", "ASCII85Decode", "ASCIIHexDecode")
+
     @staticmethod
-    def _streams(data: bytes) -> List[bytes]:
+    def _stream_filters(header: bytes) -> List[str]:
+        """The /Filter entry belonging to this stream: a single name or an array."""
+        last = None
+        for m in re.finditer(rb"/Filter\s*(\[[^\]]*\]|/[A-Za-z0-9]+)", header):
+            last = m
+        if last is None:
+            return []
+        return [n.decode("latin-1") for n in re.findall(rb"/([A-Za-z0-9]+)", last.group(1))]
+
+    @classmethod
+    def _decode(cls, raw: bytes, filters: List[str]) -> Optional[bytes]:
+        """Undo the filter chain, or return None if any link is one we cannot undo."""
+        for name in filters:
+            if name == "FlateDecode":
+                try:
+                    raw = zlib.decompress(raw)
+                except zlib.error:
+                    try:                       # some writers omit the zlib header
+                        raw = zlib.decompressobj(-15).decompress(raw)
+                    except zlib.error:
+                        return None
+            elif name == "ASCII85Decode":
+                body = b"".join(raw.split())   # the encoding ignores whitespace
+                if body.startswith(b"<~"):
+                    body = body[2:]
+                if body.endswith(b"~>"):
+                    body = body[:-2]
+                try:
+                    raw = base64.a85decode(body)
+                except Exception:
+                    return None
+            elif name == "ASCIIHexDecode":
+                body = b"".join(raw.split()).rstrip(b">")
+                if len(body) % 2:
+                    body += b"0"
+                try:
+                    raw = bytes.fromhex(body.decode("ascii"))
+                except Exception:
+                    return None
+            else:
+                return None                    # an image codec, or something exotic
+        return raw
+
+    @classmethod
+    def _streams(cls, data: bytes) -> List[bytes]:
         out = []
         # (?<!end) so the "stream" inside "endstream" does not open a phantom page
         for m in re.finditer(rb"(?<!end)stream\r?\n", data):
@@ -277,13 +342,30 @@ class PdfExtractor(DocumentExtractor):
                 continue
             raw = data[start:end]
             header = data[max(0, m.start() - 400):m.start()]
-            if b"FlateDecode" in header:
-                try:
-                    raw = zlib.decompress(raw)
-                except zlib.error:
-                    continue
-            out.append(raw)
+            decoded = cls._decode(raw, cls._stream_filters(header))
+            if decoded is None:
+                continue
+            out.append(decoded)
         return out
+
+    @classmethod
+    def _failure_note(cls, data: bytes, default: str) -> str:
+        """Why the read failed. A PDF this reader cannot decompress is not the same thing as
+        a photograph of a page, and telling a supplier the wrong one sends them off to fix
+        the wrong problem."""
+        unhandled = cls._unhandled_filters(data)
+        if unhandled:
+            return ("This PDF compresses its content with %s, which this reader cannot undo. "
+                    "Re-save it as a standard PDF, or send the quotation as a spreadsheet or "
+                    "in the email body." % ", ".join(unhandled))
+        return default
+
+    @classmethod
+    def _unhandled_filters(cls, data: bytes) -> List[str]:
+        """Filters present in the file that this reader cannot undo — so a failure can name
+        the reason instead of implying the PDF was scanned."""
+        names = {n.decode("latin-1") for n in re.findall(rb"/Filter\s*\[?\s*/([A-Za-z0-9]+)", data)}
+        return sorted(n for n in names if n not in cls.DECODERS)
 
     @staticmethod
     def _text_lines(stream: bytes) -> List[str]:
