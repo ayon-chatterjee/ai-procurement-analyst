@@ -33,6 +33,9 @@ python3 -m streamlit run app.py
 
 Then open http://localhost:8501 and press **Open** on *Start here — the worked example*.
 
+New to the project? **[HANDOVER.md](HANDOVER.md)** covers authentication, the rules the
+codebase is built on, the layout and a suggested first hour.
+
 The middle command builds the demo: one RFQ with 30 line items, five suppliers who reply
 in five different formats, one who never replies, one revision, one self-contradiction, one
 verified certificate and four claimed ones. It calls the real model to read the responses
