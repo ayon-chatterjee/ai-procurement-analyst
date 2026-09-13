@@ -26,8 +26,25 @@ from .supplier_models import SupplierStatus
 from .supplier_service import review_items
 
 #: Review-queue kinds that stop a price being trusted. Phase 3 already treats these as the
-#: "not ready to decide" set; an award is where that judgement finally bites.
+#: "not ready to decide" set; on this screen they are reported, not enforced.
 BLOCKING_REVIEW_KINDS = {"probable_match", "unmatched", "unresolved_price", "conflict"}
+
+#: The only findings that still stop an award, and each is a thing the award could not
+#: mean rather than a thing about a supplier: nothing chosen, one line awarded twice, a
+#: line that is not on this RFQ.
+#:
+#: Everything else informs. A buyer reaches this screen having already worked through the
+#: comparison; being told here that a quote is unresolved is useful, being *stopped* is
+#: not — it used to refuse the very supplier the system had itself proposed, with the
+#: remedy hidden in a settings panel above.
+STRUCTURAL_BLOCKERS = {"nothing_awarded", "duplicate_allocation", "unknown_line"}
+
+#: A pick can go stale after it is made: the buyer corrects a price on the comparison
+#: screen, or a revision arrives. These findings mean the chosen quote can no longer be
+#: committed to, so `AwardService.approve` drops those lines and names them rather than
+#: refusing a whole award over one line.
+DROPS_THE_LINE = {"no_price", "unknown_currency", "unresolved_basis", "moq_violation",
+                  "excluded_supplier", "no_quantity"}
 
 #: A quote inside this window is not yet expired but will be before most orders are placed.
 EXPIRING_SOON_DAYS = 7
@@ -83,14 +100,14 @@ def validate_award(award: Award, ctx, proposal: Optional[AwardProposal] = None,
         bundle = ctx.bundle(line.supplier_id or "")
 
         if supplier is None or bundle is None:
-            add(_finding("excluded_supplier", Severity.BLOCKING,
+            add(_finding("excluded_supplier", Severity.WARNING,
                          "%s has no active response on this RFQ, so %s cannot be awarded to "
                          "them." % (name or "That supplier", line.line_item_id),
                          "ComparisonMatrix.bundles", line=line.line_item_id,
                          supplier_id=line.supplier_id, supplier_name=name))
             continue
         if supplier.status == SupplierStatus.NO_RESPONSE:
-            add(_finding("excluded_supplier", Severity.BLOCKING,
+            add(_finding("excluded_supplier", Severity.WARNING,
                          "%s never replied to this RFQ." % name, "Supplier.status",
                          line=line.line_item_id, supplier_id=line.supplier_id,
                          supplier_name=name))
@@ -104,12 +121,12 @@ def validate_award(award: Award, ctx, proposal: Optional[AwardProposal] = None,
             continue
 
         if not line.quantity:
-            add(_finding("no_quantity", Severity.BLOCKING,
+            add(_finding("no_quantity", Severity.WARNING,
                          "%s has no quantity, so there is nothing to order."
                          % line.line_item_id, "LineItem.quantity", line=line.line_item_id,
                          supplier_id=line.supplier_id, supplier_name=name))
         elif rfq_line.quantity and line.quantity > rfq_line.quantity:
-            add(_finding("award_exceeds_rfq_quantity", Severity.BLOCKING,
+            add(_finding("award_exceeds_rfq_quantity", Severity.WARNING,
                          "%s awards %s units but the RFQ asks for %s."
                          % (line.line_item_id, "{:,.0f}".format(line.quantity),
                             "{:,.0f}".format(rfq_line.quantity)),
@@ -117,13 +134,13 @@ def validate_award(award: Award, ctx, proposal: Optional[AwardProposal] = None,
                          supplier_id=line.supplier_id, supplier_name=name))
 
         if line.unit_price is None:
-            add(_finding("no_price", Severity.BLOCKING,
+            add(_finding("no_price", Severity.WARNING,
                          "%s has no price we can commit to." % line.line_item_id,
                          "AwardLine.unit_price", line=line.line_item_id,
                          supplier_id=line.supplier_id, supplier_name=name,
                          evidence_ids=line.evidence_ids))
         if line.native_currency and line.native_currency not in KNOWN_CURRENCIES:
-            add(_finding("unknown_currency", Severity.BLOCKING,
+            add(_finding("unknown_currency", Severity.WARNING,
                          "%s quoted %s in '%s', which is not a currency we can read."
                          % (name, line.line_item_id, line.native_currency),
                          "SupplierQuote.currency", line=line.line_item_id,
@@ -135,13 +152,13 @@ def validate_award(award: Award, ctx, proposal: Optional[AwardProposal] = None,
         cell = ctx.cell(line.line_item_id, line.supplier_id or "")
         check = price_check(cell, ctx)
         if check.exclusion is not None and check.exclusion.code == "moq_constraint":
-            add(_finding("moq_violation", Severity.BLOCKING,
+            add(_finding("moq_violation", Severity.WARNING,
                          "%s: %s" % (name, check.exclusion.reason),
                          "SupplierQuote.moq_constraint", line=line.line_item_id,
                          supplier_id=line.supplier_id, supplier_name=name,
                          evidence_ids=check.exclusion.evidence_ids))
         elif not check.comparable and check.exclusion is not None:
-            add(_finding("unresolved_basis", Severity.BLOCKING,
+            add(_finding("unresolved_basis", Severity.WARNING,
                          "%s's price for %s can no longer be compared: %s"
                          % (name, line.line_item_id, check.exclusion.reason),
                          "PriceCheck.exclusion", line=line.line_item_id,
@@ -190,12 +207,12 @@ def validate_award(award: Award, ctx, proposal: Optional[AwardProposal] = None,
                      % " and ".join(natives), "AwardLine.native_currency"))
         rates = ctx.matrix.rates
         if rates is not None and not rates.ok:
-            add(_finding("rate_unavailable", Severity.BLOCKING,
+            add(_finding("rate_unavailable", Severity.WARNING,
                          "Exchange rates are unavailable (%s), so quotes in more than one "
                          "currency cannot be totalled." % (rates.error or "no rate"),
                          "RateTable.ok"))
     if not award.currency and award.awarded_lines:
-        add(_finding("rate_unavailable", Severity.BLOCKING,
+        add(_finding("rate_unavailable", Severity.WARNING,
                      "No comparison currency could be chosen, so this award has no total.",
                      "Award.currency"))
     if not award.awarded_lines:
@@ -229,7 +246,7 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
             if expiry is not None:
                 days_left = (expiry - today).days
                 if days_left < 0:
-                    add(_finding("expired_validity", Severity.BLOCKING,
+                    add(_finding("expired_validity", Severity.WARNING,
                                  "%s's quote lapsed on %s, %d days ago. Ask them to "
                                  "reconfirm before awarding."
                                  % (name, expiry.isoformat(), abs(days_left)),
@@ -268,8 +285,6 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
         #     whose message then listed unanswered questions.
         certs_failed = [c for c in qualification.checks
                         if c.required and not c.passed and c.kind == "certification"]
-        strict = award.thresholds.require_document_backed_certification
-        blocking = bool(required_certs and certs_failed and strict)
         if certs_failed:
             # Lead with the thing that actually blocked. Listing every unanswered
             # questionnaire item first buried the reason under things that do not block.
@@ -280,15 +295,13 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
             reasons = list(qualification.reasons) or ["no reason recorded"]
         message = "%s is %s: %s." % (name, qualification.status.replace("_", " "),
                                      "; ".join(reasons))
-        if certs_failed and blocking:
-            message += (" Either award this line to someone else, or turn off "
-                        "\"Certification must be backed by a document we hold\" in Step 1 "
-                        "— that is recorded as a decision you made.")
-        elif certs_failed:
-            message += (" Your bar allows a stated certification, so this is recorded "
-                        "rather than blocking.")
+        if certs_failed:
+            message += (" Best value skips them while you require a certificate we hold; "
+                        "awarding them anyway is your call, and it is on the record."
+                        if award.thresholds.require_document_backed_certification
+                        else " Awarding them is your call, and it is on the record.")
         add(_finding("missing_certification",
-                     Severity.BLOCKING if blocking else Severity.WARNING, message,
+                     Severity.WARNING, message,
                      "Qualification.status", supplier_id=supplier_id, supplier_name=name,
                      evidence_ids=qualification.failing_evidence_ids()))
         for check in qualification.checks:
@@ -326,12 +339,11 @@ def _validate_supplier(report: ValidationReport, ctx, award: Award, supplier_id:
             settled = bool((item.get("resolution") or {}).get("value"))
             if kind == "conflict" and settled:
                 continue        # the buyer recorded which value applies; it is not open
-            blocking = on_awarded_line and (kind != "conflict" or price_topic)
             code = "unresolved_critical_conflict" if kind == "conflict" else kind
             detail = (item.get("detail") or "")[:160]
             if not on_awarded_line:
                 detail += " This quote is not part of the award."
-            add(_finding(code, Severity.BLOCKING if blocking else Severity.WARNING,
+            add(_finding(code, Severity.WARNING,
                          "%s: %s — %s" % (name, item.get("label") or kind.replace("_", " "),
                                           detail),
                          "review_items.kind", line=line_id if on_awarded_line else None,
@@ -357,15 +369,10 @@ def _expiry(bundle, days: float) -> Optional[_dt.date]:
         return None
 
 
-def execution_blockers(report: ValidationReport) -> List[str]:
-    """The reasons execution is refused, for a button's tooltip."""
-    return [f.message for f in report.blocking]
-
-
 def validation_assumptions() -> List[str]:
     return [
         "A quote's expiry is counted from the date the response was received, because no "
         "supplier stated a start date.",
-        "A warning never blocks execution, but it has to be acknowledged: a caveat you "
-        "were never shown cannot become an excuse later.",
+        "A note never stops an award. It is recorded with the approval, so what the "
+        "buyer was looking at when they committed is on the record.",
     ]

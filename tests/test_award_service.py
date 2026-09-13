@@ -55,10 +55,16 @@ class AwardHarness(unittest.TestCase):
                 for _ in range(count)]
 
     def approved(self, **kw):
+        """Approve, under the strict bar by default.
+
+        These fixtures pair a certified dearer supplier with a cheaper claiming one, so
+        the strict bar is what makes best value and cheapest name different suppliers —
+        which is the thing most of these tests are about. The product default is lenient.
+        """
+        kw.setdefault("thresholds", thresholds(require_docs=True))
         award = self.svc.start(self.rfq.id, **kw)
-        report = self.svc.validate(award.id)
         self.svc.review(award.id)
-        return self.svc.approve(award.id, report.warning_codes())
+        return self.svc.approve(award.id)
 
     def executed(self):
         """Approve, draft, send — the state where a handoff is legal."""
@@ -96,7 +102,8 @@ class SeedingAndDecisionTest(AwardHarness):
 
     def test_the_buyer_can_take_the_cheapest_instead(self):
         self.build()
-        award = self.svc.start(self.rfq.id)
+        # Strict, so the two proposals name different suppliers and there is a choice.
+        award = self.svc.start(self.rfq.id, thresholds(require_docs=True))
         self.assertEqual(award.line("LINE-001").supplier_name, "Istanbul Ambalaj")
         award = self.svc.set_line(award.id, "LINE-001", PickSource.CHEAPEST.value)
         self.assertEqual(award.line("LINE-001").supplier_name, "Anhui Packaging Co")
@@ -150,12 +157,12 @@ class BuyerDecisionSurvivesTest(AwardHarness):
         anhui = next(s.id for s in self.svc.context(self.rfq.id).matrix.suppliers
                      if s.name == "Anhui Packaging Co")
         self.svc.set_line(award.id, "LINE-001", anhui, "keeping them on this line")
-        award = self.svc.set_thresholds(award.id, thresholds(max_lead=30, require_docs=False))
+        award = self.svc.set_thresholds(award.id, thresholds(require_docs=False))
         self.assertEqual(award.line("LINE-001").supplier_name, "Anhui Packaging Co")
 
     def test_a_line_still_on_its_seed_moves_and_says_what_it_was(self):
         self.build()
-        award = self.svc.start(self.rfq.id)
+        award = self.svc.start(self.rfq.id, thresholds(require_docs=True))
         self.assertEqual(award.line("LINE-001").supplier_name, "Istanbul Ambalaj")
         award = self.svc.reseed(award.id, thresholds(require_docs=False))
         self.assertEqual(award.line("LINE-001").supplier_name, "Anhui Packaging Co")
@@ -214,28 +221,66 @@ class LifecycleTest(AwardHarness):
         self.assertTrue(award.validation_at_approval.get("findings") is not None)
         self.assertTrue(award.approved_at)
 
-    def test_a_blocking_finding_prevents_approval(self):
+    def test_an_expired_quote_is_dropped_at_approval_rather_than_refusing_the_award(self):
+        """A pick can go stale after it is made. Refusing the whole award over one line
+        stops the good lines for the bad one, so the line is dropped and named."""
         rfq = carton_rfq(sizes=LINES)
         _, lapsed = cleared_supplier(rfq, "Istanbul Ambalaj",
                                      {i.id: 0.50 for i in rfq.line_items}, validity_days=1.0)
+        _, other = claiming_supplier(rfq, "Anhui Packaging Co", {rfq.line_items[0].id: 0.42})
         self.svc, self.rfq, self.settings, self.ai = award_service(
-            rfq=rfq, bundles=[lapsed])
+            rfq=rfq, bundles=[lapsed, other])
         award = self.svc.start(self.rfq.id, today=_dt.date(2026, 12, 1))
-        with self.assertRaises(AwardError) as caught:
-            self.svc.approve(award.id, today=_dt.date(2026, 12, 1))
-        self.assertIn("lapsed", str(caught.exception))
+        approved = self.svc.approve(award.id, today=_dt.date(2026, 12, 1))
+        self.assertEqual(approved.status, AwardStatus.APPROVED.value)
+        self.assertTrue(any("lapsed" in f["message"]
+                            for f in approved.validation_at_approval["findings"]),
+                        "the reason is kept where the buyer reads it")
 
-    def test_a_warning_must_be_acknowledged_before_approval(self):
+    def test_a_line_whose_price_went_stale_is_dropped_and_named(self):
+        """The buyer corrects a price on the comparison screen after seeding the award.
+        The line can no longer be committed to, so it is dropped rather than refusing
+        every other line alongside it."""
+        self.build()
+        award = self.svc.start(self.rfq.id)
+        stale = award.lines[0]
+        self.assertTrue(stale.awarded)
+        stale.unit_price, stale.extended = None, None
+        self.svc.store.save_award(award)
+
+        approved = self.svc.approve(award.id)
+        dropped = approved.line(stale.line_item_id)
+        self.assertFalse(dropped.awarded, "the stale line is not committed to")
+        self.assertIn("no price", dropped.absent_reason.lower())
+        self.assertTrue(approved.awarded_lines, "the other lines still go through")
+        event = next(e for e in self.svc.events(award.id)
+                     if e.event_type == ExecutionEventType.LINE_CLEARED.value)
+        self.assertIn(stale.line_item_id, event.summary)
+
+    def test_only_an_award_with_nothing_on_it_cannot_be_approved(self):
+        """The one honest stop. Everything else informs."""
+        self.build()
+        award = self.svc.start(self.rfq.id)
+        for line in award.lines:
+            self.svc.set_line(award.id, line.line_item_id, PickSource.NONE.value)
+        with self.assertRaises(AwardError) as caught:
+            self.svc.approve(award.id)
+        self.assertIn("No line is awarded", str(caught.exception))
+
+    def test_a_warning_no_longer_has_to_be_ticked_before_approving(self):
+        """Ticking a checkbox is not the same as reading a sentence. What was on screen is
+        recorded with the approval either way."""
         rfq = carton_rfq(sizes=LINES)
         _, claiming = claiming_supplier(rfq, "Anhui Packaging Co",
                                         {i.id: 0.42 for i in rfq.line_items})
         self.svc, self.rfq, self.settings, self.ai = award_service(rfq=rfq, bundles=[claiming])
-        award = self.svc.start(self.rfq.id, thresholds(require_docs=False))
-        with self.assertRaises(AwardError) as caught:
-            self.svc.approve(award.id, [])
-        self.assertIn("Acknowledge", str(caught.exception))
-        self.assertTrue(self.svc.approve(award.id,
-                                         self.svc.validate(award.id).warning_codes()))
+        award = self.svc.start(self.rfq.id)
+        codes = self.svc.validate(award.id).warning_codes()
+        self.assertTrue(codes, "this fixture does raise notes")
+        approved = self.svc.approve(award.id)
+        self.assertEqual(approved.status, AwardStatus.APPROVED.value)
+        self.assertEqual(sorted(approved.acknowledged_warnings), sorted(codes),
+                         "the record still shows what the buyer was looking at")
 
 
 class CommunicationTest(AwardHarness):
@@ -490,7 +535,11 @@ class OrderHandoffTest(AwardHarness):
             self.svc.generate_handoff(award.id)
 
     def test_it_is_revalidated_at_generation_not_trusted_from_approval(self):
-        """A supplier's response can be superseded between approval and the order."""
+        """A supplier's response can be superseded between approval and the order.
+
+        The decision screen reports rather than gates; this is the other end of the flow,
+        where the document is treated as an order and its terms are read live.
+        """
         self.build(self.drafted(2), shape="split")
         award = self.executed()
         gone = award.supplier_ids[0]
@@ -501,7 +550,7 @@ class OrderHandoffTest(AwardHarness):
         conn.close()
         with self.assertRaises(AwardError) as caught:
             self.svc.generate_handoff(award.id)
-        self.assertIn("blocked", str(caught.exception))
+        self.assertIn("no longer has an active response", str(caught.exception))
 
     def test_the_export_carries_the_lines_exactly_as_shown(self):
         self.build(self.drafted())

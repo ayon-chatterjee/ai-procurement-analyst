@@ -83,8 +83,7 @@ def render() -> None:
         st.error(str(e))
         return
 
-    _thresholds(award, award_svc)
-    _decision(award, proposal, award_svc)
+    _decision(award, proposal, award_svc, totals)
     _consequence(award, totals, report, proposal, award_svc)
     _execute(award, report, award_svc)
 
@@ -137,7 +136,7 @@ def _start_panel(rfq, award_svc) -> None:
                     unsafe_allow_html=True)
         st.markdown('<div class="aw-step-sub">Every line will be seeded with two proposals '
                     '— the cheapest comparable quote, and the cheapest that also clears '
-                    'your quality and delivery bars. You change any line you like.</div>',
+                    'the quality bar. You change any line you like.</div>',
                     unsafe_allow_html=True)
         if st.button("Start the award", type="primary", key="aw_start"):
             state.queue_award({"type": "start", "rfq_id": rfq.id})
@@ -169,78 +168,255 @@ def _history(award, award_svc) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 1 — the bars
+# 1 — the decision
 # --------------------------------------------------------------------------- #
-def _thresholds(award, award_svc) -> None:
-    st.markdown('<div class="aw-step">Step 1 · What counts as best value</div>'
-                '<div class="aw-step-sub">%s</div>' % esc(award.thresholds.describe()),
-                unsafe_allow_html=True)
+def _quality_bar(award) -> None:
+    """The one thing the buyer sets, beside the table it changes.
+
+    This was a "Step 1" panel of its own with a lead-time limit nobody used. A settings
+    step before the decision made the decision feel gated; the single switch that actually
+    changes the table belongs next to the table.
+    """
     if not award.editable:
-        st.caption("These were settled when the award was approved.")
+        st.caption("Settled when the award was approved: %s" % award.thresholds.describe())
         return
-
-    c1, c2, c3 = st.columns([2, 3, 2])
-    with c1:
-        lead = st.number_input("Maximum lead time (days)", min_value=1, max_value=365,
-                               value=int(award.thresholds.max_lead_time_days)
-                               if award.thresholds.max_lead_time_days else None,
-                               placeholder="No limit", key="aw_lead")
-    with c2:
-        docs = st.toggle("Certification must be backed by a document we hold",
-                         value=award.thresholds.require_document_backed_certification,
-                         key="aw_docs")
-    with c3:
-        changed = (float(lead) if lead else None) != award.thresholds.max_lead_time_days \
-            or docs != award.thresholds.require_document_backed_certification
-        if st.button("Apply", disabled=not changed, use_container_width=True,
-                     key="aw_apply"):
-            state.queue_award({"type": "thresholds", "award_id": award.id,
-                               "max_lead": float(lead) if lead else None,
-                               "require_docs": bool(docs)})
-            st.rerun()
+    strict = st.toggle("Best value requires a certificate we hold a copy of",
+                       value=award.thresholds.require_document_backed_certification,
+                       key="aw_docs",
+                       help="Off: a supplier who states a certificate counts. On: only a "
+                            "certificate among the documents we actually received. Either "
+                            "way, cheapest is unaffected and every price stays on screen.")
+    if strict != award.thresholds.require_document_backed_certification:
+        state.queue_award({"type": "thresholds", "award_id": award.id,
+                           "require_docs": bool(strict)})
+        st.rerun()
 
 
-# --------------------------------------------------------------------------- #
-# 2 — the decision
-# --------------------------------------------------------------------------- #
-def _decision(award, proposal, award_svc) -> None:
+def _decision(award, proposal, award_svc, totals) -> None:
     overrides = [l for l in award.lines if l.is_override]
-    st.markdown('<div class="aw-step">Step 2 · The decision</div>'
-                '<div class="aw-step-title">What the system proposes, and what you decided</div>',
+    st.markdown('<div class="aw-step">Step 1 · The decision</div>'
+                '<div class="aw-step-title">Who gets each line</div>',
                 unsafe_allow_html=True)
-    st.markdown('<div class="aw-step-sub">Every line starts on a proposal the system '
-                'calculated. <b>Decided by</b> says which — or says <b>You</b>, once you '
-                'have changed it. %s</div>'
+    st.markdown('<div class="aw-step-sub">Each line offers the two proposals the system '
+                'calculated. Pick one, or use <b>Award a line to someone else</b> below. '
+                'The ⓘ shows every supplier who priced the line, and why the pick won. '
+                '%s</div>'
                 % ("You have changed %d line%s." % (len(overrides), "" if len(overrides) == 1 else "s")
-                   if overrides else "You have not changed any line yet."),
+                   if overrides else "Nothing is committed until you approve."),
                 unsafe_allow_html=True)
 
-    rows: List[Dict[str, Any]] = []
-    for line in award.lines:
-        entry = proposal.line(line.line_item_id)
-        rows.append({
-            "Line": line.line_item_id,
-            "Item": line.line_label or NOT_AVAILABLE,
-            "Qty": line.quantity if line.quantity is not None else NOT_AVAILABLE,
-            "Decided by": _decided_by(line),
-            "Supplier": line.supplier_name or "not awarded",
-            "Unit price": line.unit_price if line.unit_price is not None else NOT_AVAILABLE,
-            "As quoted": line.native_text or NOT_AVAILABLE,
-            "Total": line.extended if line.extended is not None else NOT_AVAILABLE,
-            "Why": _why(line, entry),
-        })
-    st.dataframe(_typed(pd.DataFrame(rows)), hide_index=True, use_container_width=True)
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        _quality_bar(award)
+    with c2:
+        if proposal.lines_with_no_best_value:
+            st.caption("%d of %d lines have no supplier that meets the bar; those offer "
+                       "the cheapest quote only."
+                       % (len(proposal.lines_with_no_best_value), len(proposal.lines)))
 
-    empty = proposal.lines_with_no_best_value
-    if empty:
-        st.markdown('<div class="aw-empty">%d of %d lines have no best-value candidate: no '
-                    'supplier that quoted them clears the bars above. Those lines show the '
-                    'cheapest comparable quote instead. Relaxing a bar, or awarding to a '
-                    'named supplier, are both recorded decisions.</div>'
-                    % (len(empty), len(proposal.lines)), unsafe_allow_html=True)
+    head = st.columns(_GRID)
+    for col, title in zip(head, ("Line", "Item", "Qty", "Best value", "Cheapest",
+                                 "Your pick", "Unit price", "Total")):
+        col.markdown('<div class="aw-head">%s</div>' % title, unsafe_allow_html=True)
+    st.markdown('<div class="aw-rule"></div>', unsafe_allow_html=True)
+
+    for line in award.lines:
+        _decision_row(award, proposal.line(line.line_item_id), line)
+
+    st.markdown('<div class="aw-rule"></div>', unsafe_allow_html=True)
+    _footer(award, proposal, totals)
 
     if award.editable:
         _change_line(award, proposal, award_svc)
+
+
+#: Column widths, shared by the header and every row so they line up.
+_GRID = [0.7, 2.6, 0.6, 2.3, 2.3, 1.9, 1.5, 1.2]
+
+
+def _decision_row(award, entry, line) -> None:
+    """One line item: the two proposals, the chooser, and what it costs."""
+    cols = st.columns(_GRID)
+    cols[0].markdown('<div class="aw-cell">%s</div>' % esc(line.line_item_id),
+                     unsafe_allow_html=True)
+    cols[1].markdown('<div class="aw-cell">%s</div>'
+                     % esc(line.line_label or NOT_AVAILABLE), unsafe_allow_html=True)
+    cols[2].markdown('<div class="aw-cell">%s</div>'
+                     % (_text(line.quantity) if line.quantity is not None else NOT_AVAILABLE),
+                     unsafe_allow_html=True)
+
+    _proposal_cell(cols[3], entry, line, PickSource.BEST_VALUE.value, award.currency)
+    _proposal_cell(cols[4], entry, line, PickSource.CHEAPEST.value, award.currency)
+    _pick_cell(cols[5], award, entry, line)
+
+    with cols[6]:
+        st.markdown('<div class="aw-cell">%s</div>'
+                    % (_fmt(line.unit_price, award.currency) if line.unit_price is not None
+                       else NOT_AVAILABLE), unsafe_allow_html=True)
+        if line.native_text:
+            st.markdown('<div class="aw-cell-sub">%s</div>' % esc(line.native_text),
+                        unsafe_allow_html=True)
+    cols[7].markdown('<div class="aw-cell">%s</div>'
+                     % (_fmt(line.extended, award.currency) if line.extended is not None
+                        else NOT_AVAILABLE), unsafe_allow_html=True)
+    st.markdown('<div class="aw-rule"></div>', unsafe_allow_html=True)
+
+
+def _proposal_cell(col, entry, line, source: str, currency) -> None:
+    """A proposal's supplier and price, with the ⓘ that justifies it."""
+    candidate = entry.candidate(source) if entry else None
+    with col:
+        if candidate is None:
+            st.markdown('<div class="aw-cell-none">%s</div>'
+                        % ("none meets the bar" if source == PickSource.BEST_VALUE.value
+                           else "no comparable price"), unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="aw-cell"><b>%s</b></div>'
+                        '<div class="aw-cell-sub">%s</div>'
+                        % (esc(candidate.supplier_name), _fmt(candidate.amount, currency)),
+                        unsafe_allow_html=True)
+        if entry is not None:
+            with st.popover("ⓘ", use_container_width=False):
+                _comparison(entry, source, currency)
+
+
+def _pick_cell(col, award, entry, line) -> None:
+    """The chooser. Present only where there is a genuine choice to make."""
+    with col:
+        if line.is_override:
+            st.markdown('<div class="aw-cell"><b>You</b></div>'
+                        '<div class="aw-cell-sub">%s</div>'
+                        % esc(line.supplier_name or "no award"), unsafe_allow_html=True)
+            return
+        if entry is None or entry.cheapest is None:
+            st.markdown('<div class="aw-cell-none">nothing to pick</div>',
+                        unsafe_allow_html=True)
+            return
+        if entry.same_supplier:
+            st.markdown('<div class="aw-cell-sub">same supplier either way</div>',
+                        unsafe_allow_html=True)
+            return
+        if not award.editable:
+            st.markdown('<div class="aw-cell">%s</div>' % esc(_decided_by(line)),
+                        unsafe_allow_html=True)
+            return
+
+        options = ["Best value", "Cheapest"] if entry.best_value else ["Cheapest"]
+        current = "Best value" if line.pick_source == PickSource.BEST_VALUE.value else "Cheapest"
+        # The key carries the seed, so a re-seed or a change of the quality bar rebuilds
+        # the control against the new server state instead of holding a stale selection.
+        key = "aw_pick_%s_%s_%s" % (line.line_item_id, line.supplier_id or "none",
+                                    line.pick_source)
+        st.segmented_control("Pick", options, default=current if current in options else None,
+                             key=key, label_visibility="collapsed",
+                             on_change=_queue_pick, args=(award.id, line.line_item_id, key))
+
+
+def _queue_pick(award_id: str, line_item_id: str, key: str) -> None:
+    """Queue the chosen proposal. Inside `on_change`, because Streamlit refuses a write to
+    a widget's own key once the widget exists."""
+    picked = st.session_state.get(key)
+    if not picked:
+        return
+    state.queue_award({
+        "type": "set_line", "award_id": award_id, "line_item_id": line_item_id,
+        "choice": (PickSource.BEST_VALUE.value if picked == "Best value"
+                   else PickSource.CHEAPEST.value), "reason": ""})
+
+
+def _footer(award, proposal, totals) -> None:
+    """What the decision above adds up to."""
+    from rfq_copilot.award_calculations import basket_delta
+
+    left, right = st.columns([2.6, 3])
+    with left:
+        st.markdown('<div class="aw-cell"><b>%s</b></div>'
+                    '<div class="aw-cell-sub">across %d line%s to %d supplier%s</div>'
+                    % (esc(totals.describe()), len(award.awarded_lines),
+                       "" if len(award.awarded_lines) == 1 else "s",
+                       len(award.supplier_ids),
+                       "" if len(award.supplier_ids) == 1 else "s"),
+                    unsafe_allow_html=True)
+    with right:
+        note = basket_delta(proposal).get("note")
+        if note:
+            st.markdown('<div class="aw-cell-sub">%s</div>' % esc(note),
+                        unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Why this one? — the whole field for a line, not an assertion about two of it
+# --------------------------------------------------------------------------- #
+_QUALIFICATION_WORD = {
+    "cleared": "on file",
+    "unverified": "stated",
+    "not_cleared": "not cleared",
+    "not_assessed": "none on file",
+}
+
+
+def _certificate_word(candidate) -> str:
+    """What this supplier's certificate actually is, not what the bar concluded.
+
+    The two differ: a supplier whose only failing check is a certificate it states but
+    cannot evidence is NOT_CLEARED overall, yet passes the relaxed bar. Printing the
+    qualification verdict put "not cleared" in the certificate column of the row marked
+    best value, which reads as a contradiction and undersells a supplier that did state one.
+    """
+    if candidate.qualification == "not_cleared" and candidate.meets_bar:
+        return "stated"
+    return _QUALIFICATION_WORD.get(candidate.qualification, candidate.qualification or "—")
+
+
+def _comparison(entry, source: str, currency) -> None:
+    """Every supplier who priced this line, and what separates them.
+
+    A markdown table rather than `st.dataframe`: two of these per row over thirty rows is
+    sixty Arrow grids per render, which is the one thing that would make this page slow.
+    """
+    pick = entry.candidate(source)
+    label = "Best value" if source == PickSource.BEST_VALUE.value else "Cheapest"
+    st.markdown("**%s · %s**" % (label, esc(entry.line_item_id)))
+
+    if pick is None:
+        st.markdown(esc(entry.absent_reason or "No supplier has a comparable price here."))
+    elif source == PickSource.BEST_VALUE.value:
+        st.markdown("**%s** at %s — the lowest price from a supplier that meets the "
+                    "quality bar.%s" % (esc(pick.supplier_name), _fmt(pick.amount, currency),
+                                        " " + esc(entry.difference_note)
+                                        if entry.difference_note else ""))
+    else:
+        st.markdown("**%s** at %s — the lowest price the application will compare on this "
+                    "line." % (esc(pick.supplier_name), _fmt(pick.amount, currency)))
+
+    rows = ["| Supplier | Price (%s) | As quoted | Certificate | Validity | Lead time | |"
+            % (currency or "—"),
+            "|---|---:|---|---|---|---|---|"]
+    for c in entry.candidates:
+        marks = []
+        if entry.cheapest and c.supplier_id == entry.cheapest.supplier_id:
+            marks.append("cheapest")
+        if entry.best_value and c.supplier_id == entry.best_value.supplier_id:
+            marks.append("**best value**")
+        if not c.meets_bar and c.bar_reason:
+            marks.append(c.bar_reason)
+        rows.append("| %s | %s | %s | %s | %s | %s | %s |" % (
+            _cell(c.supplier_name), _text(c.amount), _cell(c.native),
+            _certificate_word(c),
+            "conditional" if c.validity_is_conditional else "firm",
+            ("%g d" % c.lead_time_days) if c.lead_time_days is not None else "—",
+            _cell("; ".join(marks))))
+    for ex in entry.exclusions:
+        rows.append("| %s | — | — | — | — | — | %s |"
+                    % (_cell(ex.supplier_name), _cell(ex.reason)))
+    st.markdown("\n".join(rows))
+    st.caption("Cheapest is the lowest price the application is willing to compare. Best "
+               "value is the cheapest of those whose supplier also meets the quality bar.")
+
+
+def _cell(text) -> str:
+    """Markdown-table-safe: a pipe in a supplier's name would split the row."""
+    return esc(str(text or "—")).replace("|", "\\|").replace("\n", " ")
 
 
 #: The one column that answers "is this a recommendation or my decision?". It was
@@ -266,13 +442,13 @@ def _why(line, entry) -> str:
     if entry is not None and entry.difference_note:
         return entry.difference_note
     if line.pick_source == PickSource.BEST_VALUE.value:
-        return "cheapest quote that clears the bars"
+        return "cheapest quote that meets the quality bar"
     return "cheapest comparable quote"
 
 
 def _change_line(award, proposal, award_svc) -> None:
     labels = ["%s · %s" % (l.line_item_id, l.line_label or "") for l in award.lines]
-    with st.expander("Change a line", expanded=False):
+    with st.expander("Award a line to someone else", expanded=False):
         picked = st.selectbox("Line", labels, key="aw_line_pick")
         line_id = picked.split(" · ")[0]
         entry = proposal.line(line_id)
@@ -280,15 +456,10 @@ def _change_line(award, proposal, award_svc) -> None:
         if entry is None or line is None:
             return
 
-        options: List[str] = []
-        if entry.cheapest:
-            options.append("Cheapest — %s at %s" % (entry.cheapest.supplier_name,
-                                                    _fmt(entry.cheapest.amount, award.currency)))
-        if entry.best_value:
-            options.append("Best value — %s at %s" % (entry.best_value.supplier_name,
-                                                      _fmt(entry.best_value.amount, award.currency)))
+        # Cheapest and best value are chosen in the row itself; this is only for the
+        # cases the row cannot express — a third supplier, or awarding nobody.
         others = _other_suppliers(award_svc, award, entry)
-        options += ["%s (your choice)" % name for _, name in others]
+        options = ["%s (your choice)" % name for _, name in others]
         options.append("Do not award this line")
 
         choice = st.radio("Award to", options, key="aw_choice_%s" % line_id)
@@ -328,7 +499,7 @@ def _choice_value(choice: str, others) -> str:
 # 3 — what will happen
 # --------------------------------------------------------------------------- #
 def _consequence(award, totals, report, proposal, award_svc) -> None:
-    st.markdown('<div class="aw-step">Step 3 · What will happen</div>'
+    st.markdown('<div class="aw-step">Step 2 · What will happen</div>'
                 '<div class="aw-step-title">%s</div>'
                 '<div class="aw-step-sub">across %d lines to %d supplier%s</div>'
                 % (esc(totals.describe()), len(award.awarded_lines),
@@ -361,33 +532,25 @@ def _consequence(award, totals, report, proposal, award_svc) -> None:
 
 
 def _findings(award, report) -> None:
-    if report.blocking:
-        st.markdown('<div class="aw-step-sub"><b>Blocking — %d</b></div>'
-                    % len(report.blocking), unsafe_allow_html=True)
-        for finding in report.blocking:
-            st.markdown('<div class="aw-block">%s</div>' % esc(finding.message),
+    """Everything the checks found, as notes.
+
+    These used to be three groups with a red block at the top and a checkbox beside every
+    warning. Both were theatre: the red block refused suppliers the system had proposed,
+    and ticking a box is not the same as reading a sentence. What the buyer was looking at
+    is recorded with the approval either way.
+    """
+    notes = list(report.warnings) + list(report.infos)
+    if not notes:
+        return
+    with st.expander("Notes — %d" % len(notes), expanded=False):
+        st.caption("None of these stops the award. They are recorded with it, so what you "
+                   "were looking at when you committed is on the record.")
+        for finding in report.warnings:
+            st.markdown('<div class="aw-why">· %s</div>' % esc(finding.message),
                         unsafe_allow_html=True)
-
-    if report.warnings:
-        with st.expander("Worth knowing — %d" % len(report.warnings), expanded=True):
-            st.caption("These do not stop the award, but tick each one so it is on the "
-                       "record that you saw it.")
-            acknowledged = st.session_state.get(state.K_AW_ACK) or {}
-            mine = dict(acknowledged.get(award.id, {}))
-            for code in report.warning_codes():
-                messages = [f.message for f in report.warnings if f.code == code]
-                mine[code] = st.checkbox(
-                    "%s" % messages[0], value=mine.get(code, False),
-                    key="aw_ack_%s_%s" % (award.id[-6:], code),
-                    help=("Also: " + "; ".join(messages[1:3])) if len(messages) > 1 else None)
-            acknowledged[award.id] = mine
-            st.session_state[state.K_AW_ACK] = acknowledged
-
-    if report.infos:
-        with st.expander("For the record — %d" % len(report.infos), expanded=False):
-            for finding in report.infos:
-                st.markdown('<div class="aw-why">· %s</div>' % esc(finding.message),
-                            unsafe_allow_html=True)
+        for finding in report.infos:
+            st.markdown('<div class="rfq-muted" style="font-size:.84rem">· %s</div>'
+                        % esc(finding.message), unsafe_allow_html=True)
 
 
 def _method(award, totals) -> None:
@@ -414,7 +577,7 @@ def _method(award, totals) -> None:
 # 4 — execute
 # --------------------------------------------------------------------------- #
 def _execute(award, report, award_svc) -> None:
-    st.markdown('<div class="aw-step">Step 4 · Execute</div>', unsafe_allow_html=True)
+    st.markdown('<div class="aw-step">Step 3 · Execute</div>', unsafe_allow_html=True)
 
     if award.status == AwardStatus.COMPLETED.value:
         st.success("This award is complete. The history above has the whole journey.")
@@ -426,23 +589,16 @@ def _execute(award, report, award_svc) -> None:
 
     label, action = NEXT_ACTION.get(award.status, (None, None))
     if label and action:
-        blocked = bool(report.blocking) and action in ("approve",)
-        ack = (st.session_state.get(state.K_AW_ACK) or {}).get(award.id, {})
-        outstanding = [c for c in report.unacknowledged(
-            [c for c, on in ack.items() if on])] if action == "approve" else []
-        disabled = blocked or bool(outstanding)
-        help_text = None
-        if blocked:
-            help_text = report.blocking[0].message
-        elif outstanding:
-            help_text = "Tick the warnings above first: %s" % ", ".join(
-                c.replace("_", " ") for c in outstanding)
+        # The only thing that stops a buyer here is an award that could not mean anything:
+        # nothing chosen, a line awarded twice, a line that is not on this RFQ. Notes are
+        # notes.
+        disabled = bool(report.blocking) and action == "approve"
+        help_text = report.blocking[0].message if disabled else None
         c1, c2 = st.columns([2, 5])
         with c1:
             if st.button(label, type="primary", disabled=disabled, use_container_width=True,
                          key="aw_primary", help=help_text):
-                state.queue_award({"type": action, "award_id": award.id,
-                                   "acknowledged": [c for c, on in ack.items() if on]})
+                state.queue_award({"type": action, "award_id": award.id})
                 st.rerun()
         with c2:
             if disabled and help_text:
@@ -702,15 +858,21 @@ def _process_pending() -> None:
         elif kind == "thresholds":
             svc.set_thresholds(action["award_id"],
                                AwardThresholds(
-                                   max_lead_time_days=action.get("max_lead"),
                                    require_document_backed_certification=action["require_docs"]))
-            state.flash("Bars updated. Your overrides were kept.")
+            state.flash("Quality bar updated. Your own choices were kept.")
         elif kind == "set_line":
             svc.set_line(action["award_id"], action["line_item_id"], action["choice"],
                          action.get("reason", ""))
         elif kind == "approve":
-            svc.approve(action["award_id"], action.get("acknowledged") or [])
-            state.flash("Award approved. The lines are now fixed.")
+            before = {l.line_item_id for l in svc.get(action["award_id"]).awarded_lines}
+            approved = svc.approve(action["award_id"])
+            dropped = before - {l.line_item_id for l in approved.awarded_lines}
+            if dropped:
+                state.flash("Award approved. %s dropped because the quote behind it can no "
+                            "longer be committed to — see Notes."
+                            % ", ".join(sorted(dropped)), "warning")
+            else:
+                state.flash("Award approved. The lines are now fixed.")
         elif kind == "draft":
             with st.status("Preparing supplier messages…", expanded=True) as status:
                 svc.draft_communications(action["award_id"], on_stage=lambda s: st.write(s))

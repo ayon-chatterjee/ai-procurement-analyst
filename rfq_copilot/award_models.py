@@ -103,25 +103,28 @@ class Severity(str, Enum):
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class AwardThresholds:
-    """What the buyer requires of a supplier before best value will consider it.
+    """The quality bar: what a supplier must meet before best value will consider it.
 
     Deliberately not weights. A score of 87.3 is a number this data cannot support and it
     hides why one supplier beat another; a bar can be stated in a sentence and argued with.
+
+    One thing the buyer sets, and it defaults to the lenient reading. Requiring a
+    certificate we physically hold is the stricter, rarer case — most suppliers state one
+    and attach nothing — so making it the default meant the screen opened by refusing the
+    supplier it had itself just proposed. The buyer turns it on when the certificate
+    genuinely matters, and that is recorded.
     """
-    max_lead_time_days: Optional[float] = None
-    require_document_backed_certification: bool = True
+    require_document_backed_certification: bool = False
     require_firm_validity: bool = True
 
     def labels(self) -> List[str]:
         out = []
         if self.require_document_backed_certification:
-            out.append("a certification backed by a document we hold")
+            out.append("a certificate we hold a copy of")
         else:
-            out.append("a certification the supplier states, even without a document")
+            out.append("a certificate, held or stated")
         if self.require_firm_validity:
-            out.append("a quote validity that is a fixed period rather than a condition")
-        if self.max_lead_time_days is not None:
-            out.append("a stated lead time of %g days or fewer" % self.max_lead_time_days)
+            out.append("a quote that stands for a fixed period rather than a condition")
         return out
 
     def describe(self) -> str:
@@ -130,18 +133,18 @@ class AwardThresholds:
             listed = ", ".join(labels[:-1]) + " and " + labels[-1]
         else:
             listed = labels[0] if labels else "no additional requirement"
-        return "Best value means the lowest comparable price from a supplier with %s." % listed
+        return ("Best value is the lowest comparable price from a supplier with %s." % listed)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Optional[Dict[str, Any]]) -> "AwardThresholds":
+        # Tolerant of an award stored before the lead-time bar was removed: the key is
+        # simply ignored rather than failing to load a decision already on the record.
         d = d or {}
-        lead = d.get("max_lead_time_days")
-        return cls(max_lead_time_days=float(lead) if lead is not None else None,
-                   require_document_backed_certification=bool(
-                       d.get("require_document_backed_certification", True)),
+        return cls(require_document_backed_certification=bool(
+                       d.get("require_document_backed_certification", False)),
                    require_firm_validity=bool(d.get("require_firm_validity", True)))
 
 
@@ -175,6 +178,11 @@ class Candidate:
     qualification: str = ""
     lead_time_days: Optional[float] = None
     validity_is_conditional: bool = False
+    #: Whether this supplier meets the quality bar, and why not when it does not. Carried
+    #: on the candidate so the comparison behind an ⓘ can explain a pick without asking
+    #: the engine the same question a second time.
+    meets_bar: bool = False
+    bar_reason: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -201,6 +209,11 @@ class LineProposal:
     bars_failed: List[BarResult] = field(default_factory=list)
     valid_candidates: int = 0
     exclusions: List[Exclusion] = field(default_factory=list)
+    #: Every supplier with a usable price on this line, cheapest first — not only the two
+    #: picks. Keeping the list is what lets the screen answer "why this one?" with the
+    #: whole field rather than an assertion; `propose_award` already computed it and used
+    #: to throw it away. Together with `exclusions` it accounts for every supplier.
+    candidates: List[Candidate] = field(default_factory=list)
 
     def candidate(self, source: str) -> Optional[Candidate]:
         if source == PickSource.CHEAPEST.value:
@@ -220,6 +233,7 @@ class LineProposal:
             "bars_failed": [b.to_dict() for b in self.bars_failed],
             "valid_candidates": self.valid_candidates,
             "exclusions": [e.to_dict() for e in self.exclusions],
+            "candidates": [c.to_dict() for c in self.candidates],
         }
 
 
@@ -408,6 +422,11 @@ class Award:
             if line.supplier_id and line.supplier_id not in out:
                 out.append(line.supplier_id)
         return out
+
+    def supplier_name_for(self, supplier_id: str) -> str:
+        """The name as it was when the line was awarded, for a message about that supplier."""
+        return next((l.supplier_name for l in self.lines
+                     if l.supplier_id == supplier_id and l.supplier_name), "")
 
     def lines_for(self, supplier_id: str) -> List[AwardLine]:
         return [l for l in self.awarded_lines if l.supplier_id == supplier_id]

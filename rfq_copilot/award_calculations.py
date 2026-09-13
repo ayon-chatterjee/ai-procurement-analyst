@@ -1,7 +1,7 @@
 """Who would get each line, and what it would cost.
 
 Two proposals per line. **Cheapest** is the lowest price the application is willing to
-compare. **Best value** is the lowest price from a supplier that also clears the bars the
+compare. **Best value** is the lowest price from a supplier that also meets the quality bar the
 buyer set — a certification they can evidence, a quote validity that is a period rather
 than a condition, and a lead time within a stated limit.
 
@@ -48,11 +48,10 @@ def _money(value: Optional[float], currency: Optional[str]) -> str:
 # --------------------------------------------------------------------------- #
 def clears_bars(ctx, supplier_id: str, thresholds: AwardThresholds
                 ) -> Tuple[bool, List[BarResult]]:
-    """Whether a supplier meets the buyer's requirements, and what it failed if not.
+    """Whether a supplier meets the quality bar, and what it failed if not.
 
-    The bars are read once per supplier, not once per quote: Phase 2 copies lead time,
-    validity and the rest onto every quote row, so asking thirty quotes the same question
-    would answer it thirty times.
+    Read once per supplier, not once per quote: Phase 2 copies validity and the rest onto
+    every quote row, so asking thirty quotes the same question would answer it thirty times.
     """
     name = ctx.name(supplier_id)
     bundle = ctx.bundle(supplier_id)
@@ -111,35 +110,7 @@ def clears_bars(ctx, supplier_id: str, thresholds: AwardThresholds
             "its quote validity is a condition rather than a fixed period (%s)"
             % (quote.quote_validity_text or "not stated")[:120]))
 
-    if thresholds.max_lead_time_days is not None:
-        contradiction = _lead_time_contradiction(bundle)
-        days = lead_time_days(bundle)
-        if contradiction:
-            failures.append(BarResult(supplier_id, name, "lead_time",
-                                      "it gave more than one lead time (%s)" % contradiction))
-        elif days is None:
-            # A supplier who did not state a lead time is not assumed to meet one — the
-            # same stance the analyst takes for an unstated minimum order.
-            failures.append(BarResult(supplier_id, name, "lead_time",
-                                      "it did not state a lead time we could read as days"))
-        elif days > thresholds.max_lead_time_days:
-            failures.append(BarResult(
-                supplier_id, name, "lead_time",
-                "its lead time of %g days is above the %g you set"
-                % (days, thresholds.max_lead_time_days)))
-
     return (not failures), failures
-
-
-def _lead_time_contradiction(bundle) -> str:
-    for q in bundle.quotes:
-        for c in (q.conflicts or []):
-            topic = str(c.get("topic") or "").lower()
-            if "lead" in topic or "deliver" in topic:
-                values = [str(v.get("value")) for v in (c.get("values") or []) if v.get("value")]
-                if values:
-                    return " vs ".join(values)
-    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -197,10 +168,16 @@ def propose_award(matrix: ComparisonMatrix, thresholds: AwardThresholds,
                     first_priced(bundle).quote_validity_is_conditional) if bundle and first_priced(bundle) else False))
 
         candidates.sort(key=lambda c: (c.amount, c.supplier_name.casefold()))
+        for c in candidates:
+            passed, failed = bars.get(c.supplier_id, (False, []))
+            c.meets_bar = passed
+            c.bar_reason = "" if passed else (failed[0].reason if failed
+                                              else "it does not meet the quality bar")
         entry.valid_candidates = len(candidates)
+        entry.candidates = candidates
         entry.cheapest = candidates[0] if candidates else None
 
-        clearing = [c for c in candidates if bars.get(c.supplier_id, (False, []))[0]]
+        clearing = [c for c in candidates if c.meets_bar]
         entry.best_value = clearing[0] if clearing else None
 
         if entry.cheapest is None:
@@ -208,14 +185,14 @@ def propose_award(matrix: ComparisonMatrix, thresholds: AwardThresholds,
                                    "compared." if not entry.exclusions else
                                    "No comparable price: " + entry.exclusions[0].reason)
         elif entry.best_value is None:
-            failed = [c for c in candidates if not bars.get(c.supplier_id, (False, []))[0]]
+            failed = [c for c in candidates if not c.meets_bar]
             reasons = []
             for c in failed[:3]:
                 for bar in bars.get(c.supplier_id, (False, []))[1][:1]:
                     reasons.append("%s — %s" % (c.supplier_name, bar.reason))
                     entry.bars_failed.append(bar)
-            entry.absent_reason = ("No supplier that quoted this line clears the bars: "
-                                   + "; ".join(reasons) + ".")
+            entry.absent_reason = ("No supplier that priced this line meets the quality "
+                                   "bar: " + "; ".join(reasons) + ".")
 
         if entry.cheapest and entry.best_value:
             entry.same_supplier = entry.cheapest.supplier_id == entry.best_value.supplier_id
@@ -233,8 +210,8 @@ def propose_award(matrix: ComparisonMatrix, thresholds: AwardThresholds,
             "offered there." % (len(empty), len(proposal.lines)))
     elif empty and len(empty) == len(proposal.lines) and proposal.lines:
         proposal.warnings.append(
-            "No supplier on this RFQ clears the bars you set, so best value is empty on "
-            "every line. Relaxing the certification bar is a recorded decision.")
+            "No supplier on this RFQ meets the quality bar, so best value is empty on "
+            "every line. Turning the certificate requirement off is a recorded decision.")
     return proposal
 
 
@@ -246,8 +223,8 @@ def _difference_note(entry: LineProposal, bars: Dict[str, Tuple[bool, List[BarRe
         return ""
     gap = best.amount - cheap.amount
     failed = bars.get(cheap.supplier_id, (False, []))[1]
-    why = failed[0].reason if failed else "it does not clear the bars"
-    return ("%s is %s cheaper, but %s. %s is the lowest price that clears the bars."
+    why = failed[0].reason if failed else "it does not meet the quality bar"
+    return ("%s is %s cheaper, but %s. %s is the lowest price that meets the quality bar."
             % (cheap.supplier_name, _money(round(gap, 4), currency), why, best.supplier_name))
 
 
@@ -258,9 +235,8 @@ def threshold_assumptions(thresholds: AwardThresholds, currency: Optional[str],
         out.append("Prices are compared in %s, taken from %s." % (currency, currency_reason))
     out.append(thresholds.describe())
     if not thresholds.require_document_backed_certification:
-        out.append("You relaxed the quality bar: a certification the supplier states, with "
-                   "no document we hold, counts towards best value. The records still show "
-                   "it as a claim.")
+        out.append("A certificate the supplier states, with no copy in our hands, counts "
+                   "towards best value. The records still show it as a claim.")
     out.append("Cheapest is the lowest price the application is willing to compare: its "
                "price basis is normalised, its currency is readable, its line match is "
                "confirmed and its minimum order fits this line's quantity.")
@@ -393,7 +369,7 @@ def basket_delta(proposal: AwardProposal) -> Dict[str, Any]:
     if cheapest is None or best is None:
         missing = len(proposal.lines_with_no_best_value)
         out["note"] = ("Best value cannot cover every line — %d of %d have no candidate that "
-                       "clears the bars — so the two cannot be compared as baskets."
+                       "meets the quality bar — so the two cannot be compared as baskets."
                        % (missing, len(proposal.lines))) if missing else \
                       "Not every line has a comparable price, so the baskets cannot be compared."
         return out
@@ -402,7 +378,7 @@ def basket_delta(proposal: AwardProposal) -> Dict[str, Any]:
     out["percent"] = round(100.0 * difference / cheapest, 2) if cheapest else None
     if difference == 0:
         out["note"] = "Best value costs the same as cheapest: the cheapest quote already " \
-                      "clears every bar you set."
+                      "meets the quality bar."
     else:
         direction = "more" if difference > 0 else "less"
         out["note"] = ("Best value costs %s %s (%s%%) %s than cheapest."

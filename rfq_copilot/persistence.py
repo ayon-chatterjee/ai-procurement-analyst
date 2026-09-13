@@ -559,7 +559,9 @@ class AwardRepository:
                              notified_at=excluded.notified_at, completed_at=excluded.completed_at,
                              payload=excluded.payload""",
                       (award.id, award.rfq_id, award.status, award.currency,
-                       award.thresholds.max_lead_time_days,
+                       # The lead-time bar was removed; the column stays so an award saved
+                       # before that still loads, and is written NULL from here on.
+                       None,
                        1 if award.thresholds.require_document_backed_certification else 0,
                        len(award.lines), len(award.awarded_lines), len(award.supplier_ids),
                        totals.get("grand_total"), 1 if totals.get("complete") else 0,

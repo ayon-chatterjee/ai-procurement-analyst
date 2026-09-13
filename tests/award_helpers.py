@@ -34,10 +34,10 @@ TODAY = _dt.date(2026, 9, 12)
 ANSWERED = [("required_delivery_date", "18 days", ClaimStatus.CLAIMED)]
 
 
-def thresholds(max_lead: Optional[float] = None, require_docs: bool = True,
-               require_firm: bool = True) -> AwardThresholds:
-    return AwardThresholds(max_lead_time_days=max_lead,
-                           require_document_backed_certification=require_docs,
+def thresholds(require_docs: bool = True, require_firm: bool = True) -> AwardThresholds:
+    """The quality bar. `require_docs` defaults to True here, unlike the product default,
+    because most of these tests are about what the strict bar excludes."""
+    return AwardThresholds(require_document_backed_certification=require_docs,
                            require_firm_validity=require_firm)
 
 

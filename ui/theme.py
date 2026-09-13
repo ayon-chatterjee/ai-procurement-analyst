@@ -94,6 +94,17 @@ div[data-testid="stExpander"] details { border-radius: 10px; }
 .aw-empty { background: #F8FAFC; border-left: 3px solid var(--line); padding: .5rem .75rem;
   border-radius: 6px; font-size: .86rem; color: var(--muted); }
 .aw-why { font-size: .84rem; color: var(--muted); }
+/* The decision grid: one row per line item, ruled rather than boxed — thirty bordered
+   containers read as thirty separate things rather than one table. */
+.aw-head { font-size: .68rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 700; padding-bottom: .3rem; }
+.aw-rule { border-top: 1px solid var(--line); margin: .1rem 0 .5rem 0; }
+.aw-cell { font-size: .88rem; color: var(--ink); line-height: 1.25; }
+.aw-cell b { font-weight: 600; }
+.aw-cell-sub { font-size: .76rem; color: var(--muted); line-height: 1.3; }
+.aw-cell-none { font-size: .86rem; color: #94A3B8; font-style: italic; }
+.aw-pick { font-size: .78rem; font-weight: 600; color: #166534; background: #DCFCE7;
+  padding: .1rem .45rem; border-radius: 999px; display: inline-block; }
 .aw-sim { font-size: .8rem; color: #92400E; background: #FFF7ED; padding: .35rem .6rem;
   border-radius: 6px; display: inline-block; }
 .aw-event { font-size: .86rem; color: var(--ink); margin: .15rem 0; }

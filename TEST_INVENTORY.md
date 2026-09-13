@@ -1,6 +1,6 @@
 # Test inventory
 
-562 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
+565 tests across 17 files. Run with `python3 -m unittest discover -s tests -t .`
 
 This file is generated: `python3 scripts/make_test_inventory.py`.
 
@@ -19,11 +19,11 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 | Analyst calculations (Phase 3) | 65 |
 | Analyst query & explanation guards (Phase 3) | 31 |
 | Analyst service & conversation (Phase 3) | 27 |
-| Award seeding, bars & totals (Phase 5) | 57 |
+| Award seeding, bars & totals (Phase 5) | 58 |
 | Supplier communication guards (Phase 5) | 40 |
-| Award lifecycle, execution & audit (Phase 5) | 59 |
+| Award lifecycle, execution & audit (Phase 5) | 61 |
 | End to end: one RFQ through every phase | 15 |
-| **Total** | **562** |
+| **Total** | **565** |
 
 
 ## AI boundary (Claude CLI)
@@ -761,6 +761,13 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - The two are equal when the cheapest already clears
 - There is no delta when best value cannot cover every line
 
+**Comparison** (4)
+
+- A relaxed bar puts every candidate in reach of best value
+- A supplier with no usable price is in exclusions not candidates
+- Each candidate says whether it meets the bar and why not
+- Every candidate is kept not just the two picks
+
 **Review Item Scope** (1)
 
 - An unplaceable quote from an awarded supplier warns rather than blocks
@@ -772,19 +779,16 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - That is reported as a fact not an error
 - The silent supplier is never a candidate
 
-**Threshold** (11)
+**Threshold** (8)
 
 - A conditional quote validity fails the firm bar
-- A contradicted lead time fails the bar and names both values
-- A lead time above the limit fails the bar
-- A supplier with no readable lead time fails a stated limit
-- No lead time limit admits a supplier that never stated one
+- A supplier who never stated a lead time is not barred for it
 - Relaxing the bar does not forgive a certificate never mentioned
 - Relaxing the bar never admits a failed certification
 - Relaxing the bar says so as an assumption
 - Relaxing the bar works when the rfq names a required certification
 - Relaxing the certification bar admits a stated certification
-- The default bar requires a document backed certification
+- The default bar accepts a stated certificate
 
 **Totals** (8)
 
@@ -802,20 +806,20 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - A clean award is ready to execute
 - A conditional validity warns and never blocks
 - A line the buyer declined is recorded not blocked
-- A line with no price blocks execution
+- A line with no price is reported not blocked
 - A line with no quantity blocks execution
-- A minimum order above the line quantity blocks execution
+- A minimum order above the line quantity is reported
 - A missing commercial term warns and names the term
-- A required certificate nobody holds blocks only while the bar is strict
+- A required certificate nobody holds is reported under either bar
 - A response level term is reported once not once per line
 - An award with nothing on it blocks
-- An expired quote blocks and an expiring one warns
+- An expired quote and an expiring one are both reported
 - An override that costs more is noted with its reason
 - An unanswered questionnaire item never blocks an award
 - An unverified certification warns when the rfq required none
-- Awarding a supplier who never replied blocks execution
+- Awarding a supplier who never replied is reported
 - Every finding names the field it read
-- Mixed currencies warn and block only when no rate exists
+- Mixed currencies warn and an absent rate is reported
 - The same line awarded twice blocks
 - Warnings must be acknowledged before approval
 
@@ -926,14 +930,16 @@ This file is generated: `python3 scripts/make_test_inventory.py`.
 - History is never rewritten only added to
 - The whole journey is recorded in order
 
-**Lifecycle** (7)
+**Lifecycle** (9)
 
-- A blocking finding prevents approval
-- A warning must be acknowledged before approval
+- A line whose price went stale is dropped and named
+- A warning no longer has to be ticked before approving
 - An approved award cannot have its lines changed
 - An approved award cannot have its thresholds changed
+- An expired quote is dropped at approval rather than refusing the award
 - Approval records what the buyer was looking at
 - Cancelling is the only way back and history survives
+- Only an award with nothing on it cannot be approved
 - The legal moves are the only moves
 
 **Order Handoff** (8)

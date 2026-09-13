@@ -250,7 +250,7 @@ class AwardService:
         self.store.save_award(award)
         for was, now in moved:
             self._event(award, ExecutionEventType.LINE_RESEEDED,
-                        "%s moved from %s to %s when the bars changed."
+                        "%s moved from %s to %s when the quality bar changed."
                         % (now.line_item_id, was.supplier_name or "no supplier",
                            now.supplier_name or "no supplier"),
                         subject_type="line", subject_id=now.line_item_id, actor="system",
@@ -373,28 +373,31 @@ class AwardService:
         """Freeze the decision. Nothing on the award changes after this."""
         award = self.get(award_id)
         report = self.validate(award_id, today)
+        dropped = self._drop_stale_lines(award, report)
+        if dropped:
+            # A pick went stale after it was made — a corrected price, a revision. Re-read
+            # the award rather than reporting on the one we just changed.
+            self.store.save_award(award)
+            report = self.validate(award_id, today)
         if report.blocking:
             raise AwardError("This award cannot be approved yet: %s"
                              % report.blocking[0].message)
-        outstanding = report.unacknowledged(acknowledged or [])
-        if outstanding:
-            raise AwardError(
-                "Acknowledge the warnings before approving: %s. A caveat you were never "
-                "shown cannot become an excuse later." % ", ".join(
-                    c.replace("_", " ") for c in outstanding))
 
-        # Running the validation and ticking its warnings *is* the review, so a caller who
-        # goes straight to approve has still done it. The event is recorded either way,
-        # because the history should show that the checks were read before the commitment.
+        # Reading the validation *is* the review, so a caller who goes straight to approve
+        # has still done it. The event is recorded either way, because the history should
+        # show what the checks said before the commitment.
         if award.status == AwardStatus.DRAFT.value:
             self._transition(award, AwardStatus.REVIEWED.value,
                              ExecutionEventType.AWARD_REVIEWED,
-                             "Validation read: %d blocking, %d acknowledged."
-                             % (len(report.blocking), len(report.warnings)),
+                             "Validation read: %d note%s." % (len(report.warnings),
+                                                              "" if len(report.warnings) == 1 else "s"),
                              detail={"warnings": report.warning_codes()})
 
         totals = award_totals(award)
-        award.acknowledged_warnings = list(acknowledged or [])
+        # What was on screen when the buyer committed. Nothing was ticked to get here —
+        # making someone tick a checkbox is not the same as making them read it — but the
+        # record still has to show what they were looking at.
+        award.acknowledged_warnings = list(acknowledged or []) or report.warning_codes()
         award.validation_at_approval = report.to_dict()
         award.approved_at = utc_now()
         self._transition(award, AwardStatus.APPROVED.value,
@@ -403,9 +406,41 @@ class AwardService:
                          % (totals.describe(), len(award.supplier_ids),
                             "" if len(award.supplier_ids) == 1 else "s",
                             len(award.awarded_lines)),
-                         detail={"acknowledged": list(acknowledged or []),
+                         detail={"notes_showing": report.warning_codes(),
+                                 "dropped_lines": dropped,
                                  "totals": totals.to_dict()})
         return award
+
+    def _drop_stale_lines(self, award: Award, report) -> List[str]:
+        """Un-award any line whose chosen quote can no longer be committed to.
+
+        These findings only appear when the data moved after the pick was made: a price
+        corrected on the comparison screen, a revision that arrived since. Refusing the
+        whole award over one of them stops thirty good lines for one bad one, so the line
+        is dropped, its reason is kept where the buyer will read it, and the approval event
+        names it.
+        """
+        from .award_validation import DROPS_THE_LINE
+
+        reasons: Dict[str, str] = {}
+        for finding in report.findings:
+            if finding.code in DROPS_THE_LINE and finding.line_item_id:
+                reasons.setdefault(finding.line_item_id, finding.message)
+        dropped: List[str] = []
+        for line in award.lines:
+            reason = reasons.get(line.line_item_id)
+            if reason is None or not line.awarded:
+                continue
+            line.supplier_id, line.supplier_name = "", ""
+            line.unit_price, line.extended, line.native_text = None, None, ""
+            line.quote_id, line.response_id = "", ""
+            line.pick_source = PickSource.NONE.value
+            line.absent_reason = reason
+            dropped.append(line.line_item_id)
+            self._event(award, ExecutionEventType.LINE_CLEARED,
+                        "%s was dropped at approval: %s" % (line.line_item_id, reason),
+                        subject_type="line", subject_id=line.line_item_id, actor="system")
+        return dropped
 
     def cancel(self, award_id: str, reason: str) -> Award:
         """The only way back from an approved award. History stays whole."""
@@ -688,9 +723,22 @@ class AwardService:
                              "order handoff.")
         report = self.validate(award_id, today)
         if report.blocking:
-            raise AwardError("The order handoff is blocked: %s" % report.blocking[0].message)
+            raise AwardError("The order handoff cannot be generated: %s"
+                             % report.blocking[0].message)
 
         ctx = self.context(award.rfq_id, award.currency, today)
+        # The decision screen reports and does not gate, because a buyer reaching it has
+        # already worked through the comparison. This is the other end: the handoff is the
+        # document treated as an order. Its commercial terms are read live, so a supplier
+        # whose response has gone since approval would produce an order whose payment and
+        # delivery terms are silently blank. That is worth stopping for.
+        withdrawn = [award.supplier_name_for(sid) or sid for sid in award.supplier_ids
+                     if ctx.bundle(sid) is None]
+        if withdrawn:
+            raise AwardError(
+                "%s no longer has an active response on this RFQ, so the order would have "
+                "no commercial terms. Re-check the quote before generating the handoff."
+                % ", ".join(sorted(withdrawn)))
         out: List[OrderHandoff] = []
         for ordinal, supplier_id in enumerate(award.supplier_ids, start=1):
             out.append(self._handoff_for(award, supplier_id, ctx, ordinal))

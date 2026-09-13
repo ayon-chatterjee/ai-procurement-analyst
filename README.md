@@ -76,7 +76,7 @@ Run `python3 scripts/seed_demo.py --extract` first. Then, in order:
 | 3:00–5:00 | **2 · Quotes & Comparison** (open the worked example from the sidebar's Saved RFQs) | One table from a spreadsheet, a PDF, a Word file, a plain email and a photograph. `· review` marks a price the system will not stand behind. Pick a line → *Where from?* shows the supplier's own sentence and its page. |
 | 5:00–6:00 | **Needs review** tab | 17 things the system refuses to assert. Settle Shenzhen's contradictory lead time — both values stay on the record. Note *Claim without a certificate*: four suppliers say ISO 9001, one attached it. |
 | 6:00–7:30 | **3 · Procurement Analyst** | *Cheapest by line* (instant). *Cheapest among QA-cleared* — the answer collapses to one supplier, and the assumption says why. Type one of your own if you have 60 s to spare. |
-| 7:30–9:00 | **4 · Award & Execution** → *Start the award* | Strict bar: 11 of 30 lines have no best-value candidate, and the screen says so rather than showing an empty column. Untick the certification bar, set 22 days: **USD 42,000.00, best value costs USD 80.40 (0.19 %) more than cheapest.** Change one line and watch *Decided by* flip to **You**. |
+| 7:30–9:00 | **4 · Award & Execution** → *Start the award* | Every line shows both proposals with a chooser between them. Open an **ⓘ**: the whole field for that line, and why the pick won. Flip one row and watch the total move. Turn on *Best value requires a certificate we hold a copy of* and watch best value narrow to the one supplier that has one. |
 | 9:00–10:00 | Approve → *Prepare supplier messages* → handoff | Tick the warnings, approve. Each letter is written from that supplier's lines only. Paste a rival's price into one and it cannot be sent. Generate the handoff, then open **History**. |
 
 The two model-backed steps are the Copilot turn (~35 s) and the supplier letters (~30 s
@@ -177,22 +177,26 @@ and after.
 
 1. From the comparison or the analyst, press **Take a decision**, or open
    **Award & Execution**. **Start the award** seeds every line.
-2. Each line carries two proposals. *Cheapest* is the lowest valid quote. *Best value* is
-   the cheapest quote that clears the bars you set at the top of the page: a certificate
-   we actually hold, a firm (non-conditional) quote validity, and an optional lead-time
-   limit.
-3. On the strict default, **19 of the 30 lines have no best-value candidate at all** —
-   only one supplier in this dataset holds a document-backed certificate, and it quoted 11
-   lines at 26 days. The screen says so rather than showing an empty column, and offers the
-   relaxation as one click, recorded as an assumption.
-4. Relaxed, with a 22-day lead-time limit, the two baskets are comparable and the trade-off
-   is real: **cheapest USD 41,919.60 against best value USD 42,000.00 — USD 80.40 (0.19%)
-   more, for a 21-day lead time instead of 26.** Both figures are computed in Python.
+2. Every line offers the same two proposals side by side. *Cheapest* is the lowest quote
+   the application is willing to compare. *Best value* is the cheapest of those whose
+   supplier also meets the **quality bar** — a certificate and a quote that stands for a
+   fixed period rather than a condition. Pick either, per line, in the row itself.
+3. The **ⓘ** beside each proposal opens the whole field for that line: every supplier who
+   priced it, their price as quoted, whether their certificate is on file or merely
+   stated, their validity and lead time — and, for anyone the bar excluded, the reason.
+   The two lists together account for every supplier, so nothing is quietly dropped.
+4. One toggle sets the bar: **Best value requires a certificate we hold a copy of.** It is
+   off by default, because most suppliers state a certificate and attach nothing. Turn it
+   on and best value narrows to suppliers whose certificate is among the documents
+   received — recorded as an assumption on the award.
 5. Override any line to any supplier with a **valid** price on it. A reason is required, and
    an override survives a re-seed; a line still on its seed is re-seeded and the screen says
    what it moved from.
-6. **Approve** runs validation. Blocking findings disable the button; warnings must each be
-   ticked, and the list of what you acknowledged is stored on the approval event.
+6. **Approve** commits the lines. Validation runs and everything it found is listed under
+   *Notes*, recorded with the approval — but none of it stops you. The only refusal is an
+   award with nothing on it. A line whose quote went stale since you picked it (a price
+   corrected upstream, a revision that landed) is dropped and named, rather than holding
+   up the twenty-nine that are fine.
 7. **Prepare supplier messages** makes one call per supplier. Claude writes prose only — it
    is never given a rival's name, price or ranking, and the schema it fills has no numeric
    field. The line table under each letter is rendered by the application.
@@ -412,8 +416,8 @@ splitting one line's quantity across suppliers.
 
 Phase 4 as briefed is a weighted best-value score. It is not built, and Phase 5 never reads
 one. What Phase 5 genuinely needed was an award *decision* to execute, so it has the
-smallest honest one: **best value is the cheapest quote that clears explicit bars**, each
-bar set by the buyer on the screen and each failure named. No weights, no composite score,
+smallest honest one: **best value is the cheapest quote from a supplier that meets an
+explicit quality bar**, with every failure named on screen. No weights, no composite score,
 nothing to tune until it produces the answer someone already wanted.
 
 The engine a weighted Phase 4 would need is in place either way:

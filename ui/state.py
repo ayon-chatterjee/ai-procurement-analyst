@@ -48,7 +48,6 @@ K_AN_RFQ = "an_rfq_id"
 K_AW_ID = "aw_award_id"
 K_AW_PENDING = "aw_pending_action"
 K_AW_ERROR = "aw_error"
-K_AW_ACK = "aw_acknowledged"
                                    # Deliberately not "pg_run": a widget key of the same
                                    # name would overwrite it with the button's bool.
 

@@ -84,7 +84,7 @@ class AwardSeedingTest(unittest.TestCase):
         line = proposal_for(self.rfq, [claiming]).line("LINE-001")
         self.assertIsNotNone(line.cheapest)
         self.assertIsNone(line.best_value)
-        self.assertIn("clears the bars", line.absent_reason)
+        self.assertIn("meets the quality bar", line.absent_reason)
         self.assertIn("Anhui", line.absent_reason)
 
     def test_a_quote_whose_minimum_order_is_too_high_is_never_a_candidate(self):
@@ -128,9 +128,12 @@ class ThresholdTest(unittest.TestCase):
     def setUp(self):
         self.rfq = carton_rfq(sizes=LINES)
 
-    def test_the_default_bar_requires_a_document_backed_certification(self):
-        self.assertTrue(AwardThresholds().require_document_backed_certification)
-        self.assertIsNone(AwardThresholds().max_lead_time_days)
+    def test_the_default_bar_accepts_a_stated_certificate(self):
+        """The lenient reading is the default. Requiring a certificate we physically hold
+        is the rarer case, and defaulting to it meant the award screen opened by refusing
+        the supplier it had itself proposed."""
+        self.assertFalse(AwardThresholds().require_document_backed_certification)
+        self.assertTrue(AwardThresholds().require_firm_validity)
 
     def test_relaxing_the_certification_bar_admits_a_stated_certification(self):
         _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
@@ -142,7 +145,7 @@ class ThresholdTest(unittest.TestCase):
     def test_relaxing_the_bar_says_so_as_an_assumption(self):
         _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
         relaxed = proposal_for(self.rfq, [claiming], th=thresholds(require_docs=False))
-        self.assertTrue(any("relaxed the quality bar" in a for a in relaxed.assumptions))
+        self.assertTrue(any("no copy in our hands" in a for a in relaxed.assumptions))
         self.assertTrue(any("still show it as a claim" in a for a in relaxed.assumptions))
 
     def test_relaxing_the_bar_never_admits_a_failed_certification(self):
@@ -191,47 +194,15 @@ class ThresholdTest(unittest.TestCase):
         self.assertIsNone(line.best_value)
         self.assertIn("condition", line.absent_reason)
 
-    def test_a_lead_time_above_the_limit_fails_the_bar(self):
-        _, slow = claiming_supplier(self.rfq, "Istanbul", {"LINE-001": 0.30},
-                                    lead="26 days", lead_days=26.0)
-        _, quick = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42},
-                                     lead="21 days", lead_days=21.0)
-        line = proposal_for(self.rfq, [slow, quick],
-                            th=thresholds(max_lead=22, require_docs=False)).line("LINE-001")
-        self.assertEqual(line.cheapest.supplier_name, "Istanbul")
-        self.assertEqual(line.best_value.supplier_name, "Anhui")
-        self.assertIn("26 days is above the 22", line.difference_note)
-
-    def test_a_supplier_with_no_readable_lead_time_fails_a_stated_limit(self):
+    def test_a_supplier_who_never_stated_a_lead_time_is_not_barred_for_it(self):
+        """Lead time is reported, never a bar. It was one briefly, and it barred suppliers
+        for saying nothing rather than for saying something disqualifying."""
         _, vague = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42},
                                      lead="", lead_days=None)
         ctx = context_for(self.rfq, [vague])
-        supplier_id = ctx.suppliers[0].id
-        passed, failures = clears_bars(ctx, supplier_id,
-                                       thresholds(max_lead=30, require_docs=False))
-        self.assertFalse(passed, "an unstated lead time is not assumed to meet a limit")
-        self.assertEqual([f.bar for f in failures], ["lead_time"])
-
-    def test_a_contradicted_lead_time_fails_the_bar_and_names_both_values(self):
-        conflict = [{"topic": "Production lead time", "description": "two",
-                     "values": [{"value": "18 days"}, {"value": "30 days"}]}]
-        _, mixed = bundle(self.rfq, "Shenzhen",
-                          [quote(self.rfq, "LINE-001", 0.42, lead="18 days", lead_days=18.0,
-                                 status=QuoteStatus.CONFLICT, conflicts=conflict)],
-                          certs=[("ISO 9001", ClaimStatus.CLAIMED)], answers=ANSWERED)
-        ctx = context_for(self.rfq, [mixed])
-        passed, failures = clears_bars(ctx, ctx.suppliers[0].id,
-                                       thresholds(max_lead=25, require_docs=False))
-        self.assertFalse(passed)
-        self.assertIn("18 days", failures[0].reason)
-        self.assertIn("30 days", failures[0].reason)
-
-    def test_no_lead_time_limit_admits_a_supplier_that_never_stated_one(self):
-        _, vague = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42},
-                                     lead="", lead_days=None)
-        ctx = context_for(self.rfq, [vague])
-        passed, _ = clears_bars(ctx, ctx.suppliers[0].id, thresholds(require_docs=False))
+        passed, failures = clears_bars(ctx, ctx.suppliers[0].id, thresholds(require_docs=False))
         self.assertTrue(passed)
+        self.assertEqual([f.bar for f in failures], [])
 
 
 class StressShapedTest(unittest.TestCase):
@@ -339,12 +310,9 @@ class BasketDeltaTest(unittest.TestCase):
         self.rfq = carton_rfq(sizes=LINES)
 
     def test_the_delta_says_what_the_extra_costs(self):
-        _, slow = claiming_supplier(self.rfq, "Istanbul", {"LINE-001": 0.30, "LINE-002": 0.30},
-                                    lead="26 days", lead_days=26.0)
-        _, quick = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42, "LINE-002": 0.42},
-                                     lead="21 days", lead_days=21.0)
-        proposal = proposal_for(self.rfq, [slow, quick],
-                                th=thresholds(max_lead=22, require_docs=False))
+        _, cheap = claiming_supplier(self.rfq, "Istanbul", {"LINE-001": 0.30, "LINE-002": 0.30})
+        _, certified = cleared_supplier(self.rfq, "Anhui", {"LINE-001": 0.42, "LINE-002": 0.42})
+        proposal = proposal_for(self.rfq, [cheap, certified], th=thresholds(require_docs=True))
         delta = basket_delta(proposal)
         self.assertEqual(delta["cheapest"], round(0.30 * 2000 * 2, 2))
         self.assertEqual(delta["best_value"], round(0.42 * 2000 * 2, 2))
@@ -361,7 +329,55 @@ class BasketDeltaTest(unittest.TestCase):
         _, cleared = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.30, "LINE-002": 0.30})
         delta = basket_delta(proposal_for(self.rfq, [cleared]))
         self.assertEqual(delta["difference"], 0)
-        self.assertIn("already clears", delta["note"])
+        self.assertIn("already meets the quality bar", delta["note"])
+
+
+class ComparisonTest(unittest.TestCase):
+    """What a line's ⓘ can say. The screen shows the whole field, so the proposal has to
+    carry it — it used to compute every candidate and keep only the two picks."""
+
+    def setUp(self):
+        self.rfq = carton_rfq(sizes=LINES)
+
+    def test_every_candidate_is_kept_not_just_the_two_picks(self):
+        _, cleared = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.50})
+        _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
+        _, third = claiming_supplier(self.rfq, "Viet", {"LINE-001": 0.61})
+        line = proposal_for(self.rfq, [cleared, claiming, third],
+                            th=thresholds(require_docs=True)).line("LINE-001")
+        self.assertEqual([c.supplier_name for c in line.candidates],
+                         ["Anhui", "Istanbul", "Viet"], "cheapest first")
+        self.assertEqual(line.cheapest.supplier_name, "Anhui")
+        self.assertEqual(line.best_value.supplier_name, "Istanbul")
+
+    def test_each_candidate_says_whether_it_meets_the_bar_and_why_not(self):
+        _, cleared = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.50})
+        _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
+        line = proposal_for(self.rfq, [cleared, claiming],
+                            th=thresholds(require_docs=True)).line("LINE-001")
+        by_name = {c.supplier_name: c for c in line.candidates}
+        self.assertTrue(by_name["Istanbul"].meets_bar)
+        self.assertEqual(by_name["Istanbul"].bar_reason, "")
+        self.assertFalse(by_name["Anhui"].meets_bar)
+        self.assertIn("claimed rather than backed by a document", by_name["Anhui"].bar_reason)
+
+    def test_a_supplier_with_no_usable_price_is_in_exclusions_not_candidates(self):
+        """Together the two lists account for every supplier, so the comparison can name
+        the whole field rather than quietly dropping the ones that did not qualify."""
+        _, priced = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
+        _, blocked = moq_blocked_supplier(self.rfq, "Shenzhen", {"LINE-001": 0.20})
+        line = proposal_for(self.rfq, [priced, blocked],
+                            th=thresholds(require_docs=False)).line("LINE-001")
+        self.assertEqual([c.supplier_name for c in line.candidates], ["Anhui"])
+        self.assertIn("Shenzhen", [e.supplier_name for e in line.exclusions])
+        self.assertTrue(line.exclusions[0].reason)
+
+    def test_a_relaxed_bar_puts_every_candidate_in_reach_of_best_value(self):
+        _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
+        line = proposal_for(self.rfq, [claiming],
+                            th=thresholds(require_docs=False)).line("LINE-001")
+        self.assertTrue(line.candidates[0].meets_bar)
+        self.assertTrue(line.same_supplier, "one supplier is both picks")
 
 
 class ValidationTest(unittest.TestCase):
@@ -396,15 +412,18 @@ class ValidationTest(unittest.TestCase):
         report = validate_award(award, context_for(rfq, [good]), proposal, today=TODAY)
         self.assertIn("no_quantity", blocking_codes(report) + ["no_quantity"])
 
-    def test_a_line_with_no_price_blocks_execution(self):
+    def test_a_line_with_no_price_is_reported_not_blocked(self):
         _, good = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.42, "LINE-002": 0.55})
         award, _ = self.check([good])
         award.lines[0].unit_price = None
         ctx = context_for(self.rfq, [good])
         report = validate_award(award, ctx, None, today=TODAY)
-        self.assertIn("no_price", blocking_codes(report))
+        self.assertIn("no_price", [f.code for f in report.warnings])
+        self.assertTrue(report.ok_to_execute,
+                        "a stale price is reported and the line is dropped at approval, "
+                        "not held against the other twenty-nine")
 
-    def test_a_minimum_order_above_the_line_quantity_blocks_execution(self):
+    def test_a_minimum_order_above_the_line_quantity_is_reported(self):
         _, blocked = moq_blocked_supplier(self.rfq, "Shenzhen",
                                           {"LINE-001": 0.20, "LINE-002": 0.20})
         proposal = proposal_for(self.rfq, [blocked], th=thresholds(require_docs=False))
@@ -416,9 +435,9 @@ class ValidationTest(unittest.TestCase):
             line.pick_source = PickSource.BUYER_OVERRIDE.value
             line.unit_price, line.quantity = 0.20, 2000.0
         report = validate_award(award, context_for(self.rfq, [blocked]), proposal, today=TODAY)
-        self.assertIn("moq_violation", blocking_codes(report))
+        self.assertIn("moq_violation", [f.code for f in report.warnings])
 
-    def test_awarding_a_supplier_who_never_replied_blocks_execution(self):
+    def test_awarding_a_supplier_who_never_replied_is_reported(self):
         _, good = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.42, "LINE-002": 0.55})
         quiet = silent()
         award, _ = self.check([good], extra=[quiet])
@@ -427,13 +446,13 @@ class ValidationTest(unittest.TestCase):
         award.lines[0].pick_source = PickSource.BUYER_OVERRIDE.value
         report = validate_award(award, context_for(self.rfq, [good], extra=[quiet]),
                                 None, today=TODAY)
-        self.assertIn("excluded_supplier", blocking_codes(report))
+        self.assertIn("excluded_supplier", [f.code for f in report.warnings])
 
-    def test_an_expired_quote_blocks_and_an_expiring_one_warns(self):
+    def test_an_expired_quote_and_an_expiring_one_are_both_reported(self):
         _, lapsed = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.42, "LINE-002": 0.55},
                                      validity_days=5.0)
         _, report = self.check([lapsed], today=_dt.date(2026, 10, 30))
-        self.assertIn("expired_validity", blocking_codes(report))
+        self.assertIn("expired_validity", [f.code for f in report.warnings])
 
         _, soon = cleared_supplier(self.rfq, "Istanbul", {"LINE-001": 0.42, "LINE-002": 0.55},
                                    validity_days=5.0)
@@ -454,13 +473,13 @@ class ValidationTest(unittest.TestCase):
         self.assertIn("missing_certification", [f.code for f in report.warnings])
         self.assertTrue(report.ok_to_execute)
 
-    def test_a_required_certificate_nobody_holds_blocks_only_while_the_bar_is_strict(self):
+    def test_a_required_certificate_nobody_holds_is_reported_under_either_bar(self):
         """An RFQ that names a required certification, and a supplier who merely claims it.
 
-        Blocking unconditionally made such an RFQ unawardable to anyone, with nothing on
-        screen offering a way forward. The buyer's own bar — the same toggle that decides
-        which quote counts as best value — now governs it, so relaxing is a recorded
-        decision rather than an impasse.
+        This used to stop the award, which made such an RFQ unawardable to anyone until
+        the buyer found a toggle in a settings panel — and the page was refusing the very
+        supplier it had proposed. The fact is still reported under either bar, and the
+        message says what turning the bar on would change; the decision stays the buyer's.
         """
         rfq = carton_rfq(sizes=["10 x 10 x 5", "12 x 10 x 6"])
         rfq.fields["certifications"].value = "ISO 9001"
@@ -471,17 +490,18 @@ class ValidationTest(unittest.TestCase):
         award = award_from(rfq, proposal)
         ctx = context_for(rfq, [claiming])
         strict = validate_award(award, ctx, proposal, today=TODAY)
-        blocking = [f for f in strict.blocking if f.code == "missing_certification"]
-        self.assertTrue(blocking, "a required certificate we cannot verify blocks")
-        self.assertIn("in a form we can verify", blocking[0].message)
-        self.assertNotIn("did not answer", blocking[0].message,
-                         "the message must name the reason it actually blocked on")
+        warned = [f for f in strict.warnings if f.code == "missing_certification"]
+        self.assertTrue(warned, "the buyer is still told the certificate is unverified")
+        self.assertIn("in a form we can verify", warned[0].message)
+        self.assertNotIn("did not answer", warned[0].message,
+                         "the message must name the certificate, not an unrelated gap")
+        self.assertIn("your call", warned[0].message)
+        self.assertTrue(strict.ok_to_execute, "it informs; it does not stop the award")
 
         award.thresholds = thresholds(require_docs=False)
         relaxed = validate_award(award, ctx, proposal, today=TODAY)
-        self.assertFalse([f for f in relaxed.blocking if f.code == "missing_certification"])
-        warned = [f for f in relaxed.warnings if f.code == "missing_certification"][0]
-        self.assertIn("recorded rather than blocking", warned.message)
+        self.assertTrue([f for f in relaxed.warnings if f.code == "missing_certification"])
+        self.assertTrue(relaxed.ok_to_execute)
 
     def test_an_unanswered_questionnaire_item_never_blocks_an_award(self):
         """It used to, under a finding called "missing certification" whose message then
@@ -557,7 +577,7 @@ class ValidationTest(unittest.TestCase):
         self.assertIn("better delivery commitment", note.message)
         self.assertTrue(report.ok_to_execute, "paying more for a reason is allowed")
 
-    def test_mixed_currencies_warn_and_block_only_when_no_rate_exists(self):
+    def test_mixed_currencies_warn_and_an_absent_rate_is_reported(self):
         _, usd = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42})
         _, eur = claiming_supplier(self.rfq, "Istanbul", {"LINE-002": 0.30}, currency="EUR")
         _, report = self.check([usd, eur], display_currency="USD")
@@ -565,8 +585,8 @@ class ValidationTest(unittest.TestCase):
         self.assertTrue(report.ok_to_execute)
 
         offline = RateTable(base="USD", rates={"USD": 1.0}, source="none", error="offline")
-        _, blocked = self.check([usd, eur], display_currency="USD", rates=offline)
-        self.assertIn("rate_unavailable", blocking_codes(blocked))
+        _, no_rate = self.check([usd, eur], display_currency="USD", rates=offline)
+        self.assertIn("rate_unavailable", [f.code for f in no_rate.warnings])
 
     def test_every_finding_names_the_field_it_read(self):
         _, claiming = claiming_supplier(self.rfq, "Anhui", {"LINE-001": 0.42, "LINE-002": 0.55})

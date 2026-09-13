@@ -73,7 +73,7 @@ def main() -> int:
     svc = AwardService(ai, repo, settings, SupplierService(repo, ai, settings))
     before = fingerprint(settings.db_path)
 
-    print("\n=== 1. the strict default is honest about what it cannot cover ===")
+    print("\n=== 1. a seeded award is ready to decide, not refused ===")
     # The copy inherits whatever was in flight, including an award left half-made in the
     # UI. Cancelling it keeps this script re-runnable at any moment rather than only from
     # a clean database — and cancelling is the documented way back, so using it here is
@@ -88,18 +88,32 @@ def main() -> int:
     print("      %d lines, %d supplier(s), %s" % (len(award.lines), len(award.supplier_ids),
                                                   svc.totals(award).describe()))
     print("      best value covers %d of %d" % (len(proposal.lines) - empty, len(proposal.lines)))
-    check(empty > 0, "the strict bar leaves lines uncovered and says so (%d)" % empty)
+    check(not empty, "the default bar leaves every line with a best-value candidate")
+    check(not svc.validate(award.id).blocking,
+          "a freshly seeded award is approvable, not refused over its own proposal")
 
-    print("\n=== 2. relaxing the bar is a recorded decision, not a default ===")
+    print("\n=== 2. every supplier on a line is available to explain a pick ===")
+    entry = proposal.lines[0]
+    named = {c.supplier_name for c in entry.candidates} | {e.supplier_name for e in entry.exclusions}
+    print("      %s: %d candidate(s), %d excluded"
+          % (entry.line_item_id, len(entry.candidates), len(entry.exclusions)))
+    check(len(named) >= 2, "the comparison behind an ⓘ names the field, not just the pick")
+    check(all(c.meets_bar or c.bar_reason for c in entry.candidates),
+          "a candidate that misses the bar says why")
+
+    print("\n=== 2b. tightening the bar is a recorded decision ===")
     award = svc.set_thresholds(award.id, AwardThresholds(
-        max_lead_time_days=22, require_document_backed_certification=False))
-    relaxed = svc.proposal(RFQ_ID, award.thresholds, award.currency)
-    delta = basket_delta(relaxed)
-    print("      %s" % svc.totals(award).describe())
-    print("      %s" % delta["note"])
-    check(not relaxed.lines_with_no_best_value, "every line now has a best-value candidate")
-    check(any("certification" in a.lower() for a in award.assumptions),
-          "the relaxation is stated as an assumption")
+        require_document_backed_certification=True))
+    strict = svc.proposal(RFQ_ID, award.thresholds, award.currency)
+    print("      best value now covers %d of %d"
+          % (len(strict.lines) - len(strict.lines_with_no_best_value), len(strict.lines)))
+    check(len(strict.lines_with_no_best_value) > len(proposal.lines_with_no_best_value),
+          "requiring a held certificate narrows best value")
+    check(any("certificate" in a.lower() for a in award.assumptions),
+          "the bar is stated as an assumption")
+    award = svc.set_thresholds(award.id, AwardThresholds())
+    delta = basket_delta(svc.proposal(RFQ_ID, award.thresholds, award.currency))
+    print("      %s" % (delta["note"] or "baskets identical"))
 
     print("\n=== 3. an override needs a reason and survives a re-seed ===")
     ctx = svc.context(RFQ_ID, award.currency)
@@ -123,18 +137,15 @@ def main() -> int:
     award = svc.reseed(award.id)
     check(award.line(line).supplier_id == other, "the override outlives a re-seed")
 
-    print("\n=== 4. approval is gated on the buyer having read the warnings ===")
+    print("\n=== 4. notes inform; only an empty award stops ===")
     report = svc.validate(award.id)
     print("      blocking %s" % ([f.code for f in report.blocking] or "none"))
-    print("      warnings %s" % (report.warning_codes() or "none"))
-    if report.warning_codes():
-        try:
-            svc.approve(award.id, [])
-            check(False, "approval without acknowledging the warnings is refused")
-        except AwardError:
-            check(True, "approval without acknowledging the warnings is refused")
-    award = svc.approve(award.id, report.warning_codes())
-    check(award.status == "approved", "approved, and the lines are now fixed")
+    print("      notes    %s" % (report.warning_codes() or "none"))
+    check(not report.blocking, "nothing about a supplier refuses the award")
+    award = svc.approve(award.id)
+    check(award.status == "approved", "approved without ticking anything")
+    check(sorted(award.acknowledged_warnings) == sorted(report.warning_codes()),
+          "what was on screen is still recorded with the approval")
 
     print("\n=== 5. one letter per supplier, and each knows only itself ===")
     started = time.time()
