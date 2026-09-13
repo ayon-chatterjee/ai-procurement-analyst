@@ -33,6 +33,10 @@ python3 -m streamlit run app.py
 
 Then open http://localhost:8501 and press **Open** on *Start here — the worked example*.
 
+Demoing it? **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)** is a timed ten-minute walkthrough, and
+**[Kill_the_Quote_Spreadsheet.pdf](Kill_the_Quote_Spreadsheet.pdf)** is the two-page
+product note (regenerate with `python3 scripts/make_product_note.py`).
+
 New to the project? **[HANDOVER.md](HANDOVER.md)** covers authentication, the rules the
 codebase is built on, the layout and a suggested first hour.
 
