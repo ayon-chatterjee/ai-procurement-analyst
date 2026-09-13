@@ -2,6 +2,17 @@
 
 Everything a new owner needs to run, understand and change this project.
 
+**Repository:** <https://github.com/ayon-chatterjee/ai-procurement-analyst>
+
+```bash
+git clone https://github.com/ayon-chatterjee/ai-procurement-analyst.git
+cd ai-procurement-analyst
+```
+
+If ownership of the repository has been transferred, the account in that URL changes and
+the old address redirects. Update your remote with
+`git remote set-url origin <new-url>`.
+
 ---
 
 ## 1. What it is
